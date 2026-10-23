@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "RiesgoTI PostgreSQL 16 (Docker)",
+      "Group": "RiesgoTI",
+      "Host": "db",
+      "Port": 5432,
+      "MaintenanceDB": "riesgo_ti",
+      "Username": "postgres",
+      "SSLMode": "prefer"
+    }
+  }
+}

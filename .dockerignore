@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.git/
+storage/pdfs/*
+storage/evidences/*
+storage/faiss_indices/*
+!storage/**/.gitkeep
+# Los secretos llegan por env_file en docker-compose.yml; no se copian a la imagen.
+.env
+.env.*
+!.env.example
+roadmap/
+desktop.ini

@@ -1,0 +1,7 @@
+# El código se monta en contenedores Linux: fin de línea LF.
+* text=auto eol=lf
+
+*.pdf binary
+*.png binary
+*.jpg binary
+*.index binary

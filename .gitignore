@@ -1,0 +1,26 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+staticfiles/
+storage/pdfs/*
+storage/evidences/*
+storage/faiss_indices/*
+!storage/**/.gitkeep
+.env.*
+!.env.example
+.coverage
+htmlcov/
+celerybeat-schedule*
+*.log
+
+# Hojas de ruta internas (no se versionan)
+roadmap/
+
+# Sistema operativo, Google Drive y editores
+desktop.ini
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
