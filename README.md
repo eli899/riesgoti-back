@@ -90,6 +90,23 @@ La primera construcción instala PyTorch (CPU), PyMuPDF y FAISS, y el primer pro
 | Redis 7 | `redis` | `localhost:6379` |
 | pgAdmin 4 (servidor preconfigurado en `docker/pgadmin/servers.json`) | `pgadmin` | http://localhost:5050 |
 
+### 3.3 Stack aislado para las pruebas E2E
+
+`docker-compose.e2e.yml` (raíz) define un stack desechable, proyecto `riesgoti-e2e`, para la suite Playwright de `front/e2e/`, que lo levanta y destruye sola (`pnpm test:e2e`, ver `front/README.md`):
+
+- **Base de datos en `tmpfs`:** cada arranque ejecuta `migrate` y `seed_riesgoti` sobre una BD vacía.
+- **`storage/` en un volumen propio:** PDF, evidencias e índices FAISS no se mezclan con los de desarrollo.
+- **API en el puerto 8001**, con CORS para el front de pruebas (5174) y `LOGIN_THROTTLE_RATE=1000/min`.
+- **Reutiliza recursos existentes:** la imagen `riesgo_ti-backend` y el volumen `riesgo_ti_huggingface_cache`.
+- **Modelo de embeddings precargado:** `RIESGOTI_PRELOAD_EMBEDDING_MODEL` (solo en el servicio `backend` de este stack) hace que `runserver` cargue el modelo `sentence-transformers` antes de abrir el puerto (≈ 40 s), de modo que el healthcheck lo da por sano ya caliente y la primera prueba de conectividad IA responde en menos de un segundo. Lo implementa `preload_embedding_model` (`apps/ai_config/services.py`), invocado desde `AiConfigConfig.ready()`; no actúa en `migrate`, `seed_riesgoti`, `pytest` ni en el proceso vigilante del autoreload, y un fallo de carga no impide arrancar. Su valor debe coincidir con `modelo_embedding` de la configuración semilla.
+
+Puede convivir con el stack de desarrollo. Manualmente:
+
+```bash
+docker compose -f docker-compose.e2e.yml up -d --wait   # sano cuando terminó la semilla y el modelo está cargado
+docker compose -f docker-compose.e2e.yml down -v
+```
+
 ---
 
 ## 4. Estructura

@@ -1,5 +1,7 @@
 """Casos de uso de CONFIGURACION_IA_RAG: versionado inmutable, cifrado de API keys y prueba de conectividad."""
+import logging
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -14,6 +16,10 @@ from apps.documents_rag.models import VersionDocumento
 
 PROVIDER_TIMEOUT_SECONDS = 20
 PING_TEXT = 'ping'
+# Nombre del modelo sentence-transformers que el servidor carga al arrancar (solo lo define el stack E2E).
+PRELOAD_EMBEDDING_MODEL_ENV = 'RIESGOTI_PRELOAD_EMBEDDING_MODEL'
+
+logger = logging.getLogger(__name__)
 
 
 class AIConfigService:
@@ -107,6 +113,28 @@ def _load_sentence_transformer(model_name: str):
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer(model_name)
+
+
+def preload_embedding_model(argv: Sequence[str], environ: Mapping[str, str]) -> bool:
+    """
+    Carga en memoria el modelo de embeddings del proceso que atiende peticiones, antes de abrir el puerto, para
+    que la primera prueba de conectividad no pague la carga en frío (~40 s). Solo actúa si se define
+    RIESGOTI_PRELOAD_EMBEDDING_MODEL y el proceso es el servidor (`runserver`; con autoreload, solo el hijo que
+    sirve), nunca en `migrate` ni en `seed_riesgoti`. Un fallo no impide arrancar: la carga vuelve a ser perezosa.
+    """
+    model = environ.get(PRELOAD_EMBEDDING_MODEL_ENV, '').strip()
+    if not model or 'runserver' not in argv:
+        return False
+    if '--noreload' not in argv and environ.get('RUN_MAIN') != 'true':
+        return False  # Proceso vigilante del autoreload: no sirve peticiones.
+    started = time.perf_counter()
+    try:
+        _load_sentence_transformer(model)
+    except Exception:  # Red, caché o SDK: el servidor debe arrancar igualmente.
+        logger.exception('No se pudo precargar el modelo de embeddings %s.', model)
+        return False
+    logger.info('Modelo de embeddings %s precargado en %.1f s.', model, time.perf_counter() - started)
+    return True
 
 
 class AIConnectionTester:
