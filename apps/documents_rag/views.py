@@ -6,6 +6,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.accounts.permissions import HasRiesgoTIPermission
+from apps.accounts.rbac import CodigoPermiso
 from apps.documents_rag.embeddings import resolve_embedding_settings
 from apps.documents_rag.models import FragmentoDocumento, VersionDocumento
 from apps.documents_rag.serializers import (
@@ -14,17 +15,16 @@ from apps.documents_rag.serializers import (
     VersionDocumentoOutputSerializer,
 )
 from apps.documents_rag.services import DocumentIngestionService, get_active_ai_config
-
-TAG = 'Administración: Base Documental'
+from config.constants import OpenApiTag
 
 
 @extend_schema_view(
-    list=extend_schema(tags=[TAG], summary='Versiones documentales y su estado de procesamiento'),
-    retrieve=extend_schema(tags=[TAG]),
+    list=extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], summary='Versiones documentales y su estado de procesamiento'),
+    retrieve=extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL]),
 )
 class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'documento.administrar'
+    required_permission = CodigoPermiso.DOCUMENTO_ADMINISTRAR
     serializer_class = VersionDocumentoOutputSerializer
     pagination_class = None
     filterset_fields = ['procesamiento', 'activa', 'finalidad', 'documento_id']
@@ -47,7 +47,7 @@ class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, v
         return Response(VersionDocumentoOutputSerializer(fresh, context=self.get_serializer_context()).data, status=status_code)
 
     @extend_schema(
-        tags=[TAG], request={'multipart/form-data': DocumentUploadInputSerializer},
+        tags=[OpenApiTag.BASE_DOCUMENTAL], request={'multipart/form-data': DocumentUploadInputSerializer},
         responses={201: VersionDocumentoOutputSerializer}, summary='Carga un PDF como nueva versión y lo encola para su procesamiento',
     )
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser])
@@ -57,7 +57,7 @@ class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, v
         version = DocumentIngestionService.upload(request.user, dto.validated_data)
         return self._render(version, status.HTTP_201_CREATED)
 
-    @extend_schema(tags=[TAG], responses={200: DocumentPreviewOutputSerializer}, summary='Previsualización de fragmentos Markdown')
+    @extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], responses={200: DocumentPreviewOutputSerializer}, summary='Previsualización de fragmentos Markdown')
     @action(detail=True, methods=['get'])
     def preview(self, request, pk=None):
         version = (
@@ -67,31 +67,31 @@ class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, v
         )
         return Response(DocumentPreviewOutputSerializer(version).data)
 
-    @extend_schema(tags=[TAG], request=None, responses={200: VersionDocumentoOutputSerializer}, summary='Autoriza y activa la versión')
+    @extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={200: VersionDocumentoOutputSerializer}, summary='Autoriza y activa la versión')
     @action(detail=True, methods=['post'])
     def authorize(self, request, pk=None):
         return self._render(DocumentIngestionService.authorize(request.user, self.get_object()))
 
-    @extend_schema(tags=[TAG], request=None, responses={200: VersionDocumentoOutputSerializer}, summary='Reactiva una versión autorizada')
+    @extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={200: VersionDocumentoOutputSerializer}, summary='Reactiva una versión autorizada')
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
         return self._render(DocumentIngestionService.activate(request.user, self.get_object()))
 
     @extend_schema(
-        tags=[TAG], request=None, responses={200: VersionDocumentoOutputSerializer},
+        tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={200: VersionDocumentoOutputSerializer},
         summary='Desactiva la versión para nuevas consultas RAG (fragmentos y citas preservados)',
     )
     @action(detail=True, methods=['post'])
     def deactivate(self, request, pk=None):
         return self._render(DocumentIngestionService.deactivate(request.user, self.get_object()))
 
-    @extend_schema(tags=[TAG], request=None, responses={202: VersionDocumentoOutputSerializer}, summary='Re-procesa una versión en ERROR')
+    @extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={202: VersionDocumentoOutputSerializer}, summary='Re-procesa una versión en ERROR')
     @action(detail=True, methods=['post'])
     def retry(self, request, pk=None):
         return self._render(DocumentIngestionService.retry(request.user, self.get_object()), status.HTTP_202_ACCEPTED)
 
     @extend_schema(
-        tags=[TAG], request=None, responses={202: VersionDocumentoOutputSerializer},
+        tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={202: VersionDocumentoOutputSerializer},
         summary='Re-vectoriza los fragmentos con el modelo de embeddings vigente',
     )
     @action(detail=True, methods=['post'])

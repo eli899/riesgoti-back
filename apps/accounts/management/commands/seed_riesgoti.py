@@ -4,6 +4,8 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from apps.accounts.models import Permiso, Rol, RolPermiso, Usuario
+from apps.accounts.rbac import SOD_RISK_PERMISSIONS, CodigoPermiso, RolCodigo
+from apps.ai_config.constants import ProveedorEmbedding, ProveedorLlm
 from apps.ai_config.models import ConfiguracionIARAG
 from apps.assets_matrix.models import (
     Activo,
@@ -21,51 +23,51 @@ from apps.risks.seed_risks import seed_risks
 SEED_PASSWORD = 'RiesgoTI2026!'
 
 ROLES = [
-    ('REPORTANTE', 'Reportante'),
-    ('ANALISTA', 'Analista'),
-    ('ADMIN', 'Administrador'),
+    (RolCodigo.REPORTANTE, 'Reportante'),
+    (RolCodigo.ANALISTA, 'Analista'),
+    (RolCodigo.ADMIN, 'Administrador'),
 ]
 
 PERMISOS = [
-    ('incidencia.crear', 'Registrar nuevas incidencias'),
-    ('incidencia.ver_propias', 'Consultar las incidencias reportadas por el propio usuario'),
-    ('incidencia.ver_todas', 'Consultar todas las incidencias'),
-    ('incidencia.cerrar_propias_por_feedback', 'Cerrar incidencias propias al confirmar que la orientación funcionó'),
-    ('atencion.ver_cola', 'Consultar la cola de atención humana (N2)'),
-    ('atencion.atender', 'Atender incidencias derivadas a N2'),
-    ('riesgo.revisar_agrupacion', 'Revisar agrupaciones de incidencias en versiones de riesgo'),
-    ('riesgo.evaluar', 'Evaluar riesgos en la matriz 5x5'),
-    ('riesgo.validar', 'Emitir decisiones sobre versiones de riesgo'),
-    ('riesgo.consultar', 'Consultar riesgos y tablero de indicadores'),
-    ('activo.administrar', 'Administrar el catálogo de activos'),
-    ('documento.administrar', 'Administrar y autorizar documentos normativos'),
-    ('matriz.administrar', 'Administrar la configuración de la matriz de riesgo'),
-    ('usuario.administrar', 'Administrar usuarios'),
-    ('rol.administrar', 'Administrar roles y permisos'),
+    (CodigoPermiso.INCIDENCIA_CREAR, 'Registrar nuevas incidencias'),
+    (CodigoPermiso.INCIDENCIA_VER_PROPIAS, 'Consultar las incidencias reportadas por el propio usuario'),
+    (CodigoPermiso.INCIDENCIA_VER_TODAS, 'Consultar todas las incidencias'),
+    (CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK, 'Cerrar incidencias propias al confirmar que la orientación funcionó'),
+    (CodigoPermiso.ATENCION_VER_COLA, 'Consultar la cola de atención humana (N2)'),
+    (CodigoPermiso.ATENCION_ATENDER, 'Atender incidencias derivadas a N2'),
+    (CodigoPermiso.RIESGO_REVISAR_AGRUPACION, 'Revisar agrupaciones de incidencias en versiones de riesgo'),
+    (CodigoPermiso.RIESGO_EVALUAR, 'Evaluar riesgos en la matriz 5x5'),
+    (CodigoPermiso.RIESGO_VALIDAR, 'Emitir decisiones sobre versiones de riesgo'),
+    (CodigoPermiso.RIESGO_CONSULTAR, 'Consultar riesgos y tablero de indicadores'),
+    (CodigoPermiso.ACTIVO_ADMINISTRAR, 'Administrar el catálogo de activos'),
+    (CodigoPermiso.DOCUMENTO_ADMINISTRAR, 'Administrar y autorizar documentos normativos'),
+    (CodigoPermiso.MATRIZ_ADMINISTRAR, 'Administrar la configuración de la matriz de riesgo'),
+    (CodigoPermiso.USUARIO_ADMINISTRAR, 'Administrar usuarios'),
+    (CodigoPermiso.ROL_ADMINISTRAR, 'Administrar roles y permisos'),
 ]
 
 # Segregación de Funciones (ISO/IEC 27001): ADMIN jamás recibe permisos de evaluación/decisión de riesgos.
-PERMISOS_PROHIBIDOS_ADMIN = {'riesgo.revisar_agrupacion', 'riesgo.evaluar', 'riesgo.validar'}
+PERMISOS_PROHIBIDOS_ADMIN = SOD_RISK_PERMISSIONS
 
 ROL_PERMISOS = {
-    'REPORTANTE': ['incidencia.crear', 'incidencia.ver_propias', 'incidencia.cerrar_propias_por_feedback'],
-    'ANALISTA': [
-        'incidencia.ver_propias', 'incidencia.ver_todas', 'atencion.ver_cola', 'atencion.atender',
-        'riesgo.revisar_agrupacion', 'riesgo.evaluar', 'riesgo.validar', 'riesgo.consultar',
+    RolCodigo.REPORTANTE: [CodigoPermiso.INCIDENCIA_CREAR, CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK],
+    RolCodigo.ANALISTA: [
+        CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_VER_TODAS, CodigoPermiso.ATENCION_VER_COLA, CodigoPermiso.ATENCION_ATENDER,
+        CodigoPermiso.RIESGO_REVISAR_AGRUPACION, CodigoPermiso.RIESGO_EVALUAR, CodigoPermiso.RIESGO_VALIDAR, CodigoPermiso.RIESGO_CONSULTAR,
     ],
-    'ADMIN': [
-        'incidencia.ver_propias', 'incidencia.ver_todas', 'riesgo.consultar', 'activo.administrar',
-        'documento.administrar', 'matriz.administrar', 'usuario.administrar', 'rol.administrar',
+    RolCodigo.ADMIN: [
+        CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_VER_TODAS, CodigoPermiso.RIESGO_CONSULTAR, CodigoPermiso.ACTIVO_ADMINISTRAR,
+        CodigoPermiso.DOCUMENTO_ADMINISTRAR, CodigoPermiso.MATRIZ_ADMINISTRAR, CodigoPermiso.USUARIO_ADMINISTRAR, CodigoPermiso.ROL_ADMINISTRAR,
     ],
 }
 
 USUARIOS = [
-    ('lucia.ramirez@empresa.pe', 'Lucía', 'Ramírez', 'REPORTANTE'),
-    ('jorge.salas@empresa.pe', 'Jorge', 'Salas', 'REPORTANTE'),
-    ('andrea.quispe@empresa.pe', 'Andrea', 'Quispe', 'ANALISTA'),
-    ('martin.torres@empresa.pe', 'Martín', 'Torres', 'ANALISTA'),
-    ('carla.mendoza@empresa.pe', 'Carla', 'Mendoza', 'ADMIN'),
-    ('diego.vargas@empresa.pe', 'Diego', 'Vargas', 'ADMIN'),
+    ('lucia.ramirez@empresa.pe', 'Lucía', 'Ramírez', RolCodigo.REPORTANTE),
+    ('jorge.salas@empresa.pe', 'Jorge', 'Salas', RolCodigo.REPORTANTE),
+    ('andrea.quispe@empresa.pe', 'Andrea', 'Quispe', RolCodigo.ANALISTA),
+    ('martin.torres@empresa.pe', 'Martín', 'Torres', RolCodigo.ANALISTA),
+    ('carla.mendoza@empresa.pe', 'Carla', 'Mendoza', RolCodigo.ADMIN),
+    ('diego.vargas@empresa.pe', 'Diego', 'Vargas', RolCodigo.ADMIN),
 ]
 
 TIPOS_ACTIVO = ['Aplicación', 'Servicio', 'Infraestructura de red', 'Equipo', 'Servidor', 'Estación de trabajo']
@@ -125,7 +127,7 @@ class Command(BaseCommand):
             for codigo, descripcion in PERMISOS
         }
 
-        prohibidos = PERMISOS_PROHIBIDOS_ADMIN.intersection(ROL_PERMISOS['ADMIN'])
+        prohibidos = PERMISOS_PROHIBIDOS_ADMIN.intersection(ROL_PERMISOS[RolCodigo.ADMIN])
         if prohibidos:
             raise RuntimeError(f'Violación de SoD: ADMIN no puede recibir {sorted(prohibidos)}')
 
@@ -217,9 +219,9 @@ class Command(BaseCommand):
 
         ConfiguracionIARAG.objects.create(
             version_configuracion='v1.0-default',
-            proveedor_llm='GEMINI',
+            proveedor_llm=ProveedorLlm.GEMINI,
             modelo_llm='gemini-2.5-flash',
-            proveedor_embedding='SENTENCE_TRANSFORMERS',
+            proveedor_embedding=ProveedorEmbedding.SENTENCE_TRANSFORMERS,
             modelo_embedding='sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
             chunk_size=800,
             chunk_overlap=120,

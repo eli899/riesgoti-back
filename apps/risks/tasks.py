@@ -1,10 +1,15 @@
 from celery import shared_task
+from django.conf import settings
 
 from apps.risks.services import OperationalRAGService, StrategicRiskAnalysisService
 
 # Los servicios capturan cualquier excepción y la registran en TAREA_IA (estado ERROR); la tarea Celery no
 # se reintenta automáticamente para no duplicar orientaciones. El límite suave aborta llamadas colgadas al proveedor.
-TASK_OPTIONS = {'acks_late': True, 'soft_time_limit': 180, 'time_limit': 240}
+TASK_OPTIONS = {
+    'acks_late': True,
+    'soft_time_limit': settings.CELERY_AI_TASK_SOFT_TIME_LIMIT,
+    'time_limit': settings.CELERY_AI_TASK_TIME_LIMIT,
+}
 
 
 @shared_task(name='risks.run_operational_rag', **TASK_OPTIONS)

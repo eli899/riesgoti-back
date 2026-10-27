@@ -1,9 +1,22 @@
 from rest_framework import serializers
 
+from apps.assets_matrix.constants import MATRIX_MIN_LEVEL, MATRIX_SIZE
 from apps.assets_matrix.models import Activo
+from apps.risks import messages as msg
+from apps.risks.constants import (
+    CORRECTABLE_FIELDS,
+    DECISION_TEXTO_MAX_LENGTH,
+    DECISIONES_CON_OBSERVACION,
+    MIN_JUSTIFICACION,
+    MIN_OBSERVACION,
+    OBSERVACION_MAX_LENGTH,
+    AccionDecisionRiesgo,
+    EstadoVinculo,
+)
+from apps.risks.models import VersionRiesgo
+from config.constants import column_max_length
 
-DECISION_ACTIONS = ['VALIDADA', 'CORREGIDA', 'RECHAZADA']
-CORRECTABLE_FIELDS = ('titulo', 'descripcion', 'amenaza', 'vulnerabilidad', 'consecuencia', 'recomendacion')
+DECISION_ACTIONS = [a.value for a in AccionDecisionRiesgo]
 
 
 # ---------------------------------------------------------------------------
@@ -27,34 +40,34 @@ class RetryStrategicAnalysisOutputSerializer(serializers.Serializer):
 # DTOs de entrada de gobierno de riesgos
 # ---------------------------------------------------------------------------
 class RemoveIncidentFromGroupInputSerializer(serializers.Serializer):
-    motivo_retiro = serializers.CharField(min_length=10, trim_whitespace=True)
+    motivo_retiro = serializers.CharField(min_length=MIN_OBSERVACION, trim_whitespace=True)
 
 
 class RestoreIncidentToGroupInputSerializer(serializers.Serializer):
-    observacion = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    observacion = serializers.CharField(required=False, allow_blank=True, max_length=OBSERVACION_MAX_LENGTH)
 
 
 class ConfirmGroupingInputSerializer(serializers.Serializer):
     activo_confirmado_id = serializers.PrimaryKeyRelatedField(
         source='activo_confirmado', queryset=Activo.objects.filter(activo=True),
-        error_messages={'does_not_exist': 'El activo seleccionado no existe o está inactivo.'},
+        error_messages={'does_not_exist': msg.ACTIVO_INEXISTENTE},
     )
-    justificacion_cambio_activo = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+    justificacion_cambio_activo = serializers.CharField(required=False, allow_blank=True, max_length=OBSERVACION_MAX_LENGTH)
 
 
 class RiskEvaluateInputSerializer(serializers.Serializer):
-    probabilidad = serializers.IntegerField(min_value=1, max_value=5)
-    impacto = serializers.IntegerField(min_value=1, max_value=5)
-    justificacion = serializers.CharField(min_length=15, trim_whitespace=True)
+    probabilidad = serializers.IntegerField(min_value=MATRIX_MIN_LEVEL, max_value=MATRIX_SIZE)
+    impacto = serializers.IntegerField(min_value=MATRIX_MIN_LEVEL, max_value=MATRIX_SIZE)
+    justificacion = serializers.CharField(min_length=MIN_JUSTIFICACION, trim_whitespace=True)
 
 
 class RiskDecisionInputSerializer(serializers.Serializer):
     """Las precondiciones que dependen del estado de la versión se validan en RiskGovernanceDecisionService."""
 
     accion = serializers.ChoiceField(choices=DECISION_ACTIONS)
-    observacion = serializers.CharField(required=False, allow_blank=True, max_length=4000)
-    justificacion_sin_fuentes = serializers.CharField(required=False, allow_blank=True, max_length=4000)
-    titulo = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    observacion = serializers.CharField(required=False, allow_blank=True, max_length=DECISION_TEXTO_MAX_LENGTH)
+    justificacion_sin_fuentes = serializers.CharField(required=False, allow_blank=True, max_length=DECISION_TEXTO_MAX_LENGTH)
+    titulo = serializers.CharField(required=False, allow_blank=True, max_length=column_max_length(VersionRiesgo, 'titulo'))
     descripcion = serializers.CharField(required=False, allow_blank=True)
     amenaza = serializers.CharField(required=False, allow_blank=True)
     vulnerabilidad = serializers.CharField(required=False, allow_blank=True)
@@ -63,13 +76,13 @@ class RiskDecisionInputSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         observacion = (attrs.get('observacion') or '').strip()
-        if attrs['accion'] in ('RECHAZADA', 'CORREGIDA') and len(observacion) < 10:
-            verbo = 'rechazar' if attrs['accion'] == 'RECHAZADA' else 'corregir'
+        if attrs['accion'] in DECISIONES_CON_OBSERVACION and len(observacion) < MIN_OBSERVACION:
+            verbo = 'rechazar' if attrs['accion'] == AccionDecisionRiesgo.RECHAZADA else 'corregir'
             raise serializers.ValidationError({
-                'observacion': f'Para {verbo} la propuesta debe registrar una observación de al menos 10 caracteres.'
+                'observacion': msg.OBSERVACION_CORTA.format(verbo=verbo, minimo=MIN_OBSERVACION)
             })
-        if attrs['accion'] == 'CORREGIDA' and not any((attrs.get(f) or '').strip() for f in CORRECTABLE_FIELDS):
-            raise serializers.ValidationError({'titulo': 'Indique al menos un campo corregido para la nueva versión.'})
+        if attrs['accion'] == AccionDecisionRiesgo.CORREGIDA and not any((attrs.get(f) or '').strip() for f in CORRECTABLE_FIELDS):
+            raise serializers.ValidationError({'titulo': msg.SIN_CAMPO_CORREGIDO})
         return attrs
 
 
@@ -202,7 +215,7 @@ class RiskVersionListDetailOutputSerializer(serializers.Serializer):
         return VersionIncidenciaOutputSerializer(self._links(obj), many=True).data
 
     def get_total_incidencias_incluidas(self, obj) -> int:
-        return sum(1 for link in self._links(obj) if link.estado != 'RETIRADA')
+        return sum(1 for link in self._links(obj) if link.estado != EstadoVinculo.RETIRADA)
 
     def get_evaluacion(self, obj) -> dict | None:
         evaluacion = getattr(obj, 'evaluacion', None)

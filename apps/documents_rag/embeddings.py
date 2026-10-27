@@ -4,11 +4,12 @@ from functools import lru_cache
 import faiss
 import numpy as np
 
+from apps.ai_config.constants import ProveedorEmbedding
 from apps.ai_config.crypto import EnvelopeCryptoService
 
-DEFAULT_EMBEDDING_PROVIDER = 'SENTENCE_TRANSFORMERS'
+DEFAULT_EMBEDDING_PROVIDER = ProveedorEmbedding.SENTENCE_TRANSFORMERS
 DEFAULT_EMBEDDING_MODEL = 'sentence-transformers/paraphrase-multilingual-mpnet-base-v2'
-PROVIDER_TIMEOUT_SECONDS = 60
+EMBEDDING_TIMEOUT_SECONDS = 60
 
 
 @lru_cache(maxsize=2)
@@ -40,13 +41,13 @@ class EmbeddingProviderService:
             raise ValueError('No hay textos para vectorizar.')
         provider, model, api_key = resolve_embedding_settings(config)
 
-        if provider == 'SENTENCE_TRANSFORMERS':
+        if provider == ProveedorEmbedding.SENTENCE_TRANSFORMERS:
             raw = _load_sentence_transformer(model).encode(
                 list(texts), batch_size=32, normalize_embeddings=True, convert_to_numpy=True, show_progress_bar=False,
             )
-        elif provider == 'OPENAI':
+        elif provider == ProveedorEmbedding.OPENAI:
             raw = cls._embed_openai(texts, model, cls._require_key(api_key, provider))
-        elif provider == 'GEMINI':
+        elif provider == ProveedorEmbedding.GEMINI:
             raw = cls._embed_gemini(texts, model, cls._require_key(api_key, provider))
         else:
             raise ValueError(f'Proveedor de embeddings no soportado: {provider}.')
@@ -74,7 +75,7 @@ class EmbeddingProviderService:
     def _embed_openai(cls, texts: list[str], model: str, api_key: str) -> list[list[float]]:
         from openai import OpenAI
 
-        client = OpenAI(api_key=api_key, timeout=PROVIDER_TIMEOUT_SECONDS)
+        client = OpenAI(api_key=api_key, timeout=EMBEDDING_TIMEOUT_SECONDS)
         vectors = []
         for batch in cls._batches(texts):
             response = client.embeddings.create(model=model, input=batch)

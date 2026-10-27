@@ -26,20 +26,35 @@ from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.ai_config.models import ConfiguracionIARAG
 from apps.assets_matrix.models import CeldaMatriz, ConfiguracionMatriz, NivelRiesgo
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
 from apps.documents_rag.embeddings import EmbeddingProviderService
-from apps.documents_rag.faiss_store import FINALIDADES_ESTRATEGICAS, FINALIDADES_OPERATIVAS, FaissVectorStore
+from apps.documents_rag.constants import FINALIDADES_ESTRATEGICAS, FINALIDADES_OPERATIVAS
+from apps.documents_rag.faiss_store import FaissVectorStore
+from apps.incidents.constants import EstadoIncidencia
 from apps.incidents.models import HistorialEstadoIncidencia, Incidencia
 from apps.incidents.services import (
-    EN_ANALISIS,
-    ESTADOS_INCIDENCIA,
-    PENDIENTE_ATENCION_HUMANA,
-    RAMA_ESTRATEGICA,
-    REGISTRADA,
     IncidentService,
     current_status_subquery,
     dispatch_ai_tasks,
     latest_task,
+)
+from apps.risks import messages as msg
+from apps.risks.constants import (
+    CORRECTABLE_FIELDS,
+    MAX_RESUMEN_CHARS,
+    MIN_JUSTIFICACION,
+    MIN_JUSTIFICACION_CAMBIO_ACTIVO,
+    SIMILITUD_ORIGEN,
+    AccionDecisionRiesgo,
+    CasoAgrupacion,
+    EstadoTareaIA,
+    EstadoVersionRiesgo,
+    EstadoVinculo,
+    OrigenRecomendacion,
+    OrigenVersionRiesgo,
+    RamaTareaIA,
+    TipoOrientacion,
 )
 from apps.risks.llm_client import DETERMINISTIC_PROVIDER, LLMClient
 from apps.risks.llm_schemas import (
@@ -61,13 +76,12 @@ from apps.risks.models import (
     VersionIncidencia,
     VersionRiesgo,
 )
+from config.constants import MAX_ERROR_CHARS
 
 logger = logging.getLogger(__name__)
 
-TAREA_PENDIENTE, TAREA_PROCESANDO, TAREA_COMPLETADA, TAREA_ERROR = 'PENDIENTE', 'PROCESANDO', 'COMPLETADA', 'ERROR'
-SUGERENCIA, SENSIBLE, SIN_RESPALDO = 'SUGERENCIA', 'SENSIBLE', 'SIN_RESPALDO'
-VINCULO_SUGERIDA, VINCULO_RETIRADA = 'SUGERIDA', 'RETIRADA'
-ORIGEN_IA = 'IA'
+# Longitud de TAREA_IA.error_codigo (bd.sql).
+ERROR_CODIGO_MAX_CHARS = TareaIA._meta.get_field('error_codigo').max_length
 
 # Patrones de incidente de seguridad (alineados con SENSITIVE de figma/src/data.ts).
 SENSITIVE_RE = re.compile(
@@ -77,7 +91,6 @@ SENSITIVE_RE = re.compile(
 )
 CITATION_RE = re.compile(r'\[(\d+)\]')
 MAX_FRAGMENT_CHARS_IN_PROMPT = 1500
-MAX_ERROR_CHARS = 2000
 GROUPING_LOCK_KEY = 270050  # pg_advisory_xact_lock: serializa la agrupación de riesgos.
 
 SIN_RESPALDO_RESUMEN = ('No se encontraron manuales operativos autorizados que superen el umbral de similitud '
@@ -165,8 +178,8 @@ def first_sentence(contenido: str) -> str:
     body = ' '.join(re.sub(r'[*_`>|]+', ' ', ' '.join(lines)).split())
     for sentence in re.split(r'(?<=[.!?])\s+', body):
         if len(sentence) >= MIN_SENTENCE_CHARS:
-            return sentence[:300]
-    return (body or contenido)[:300]
+            return sentence[:MAX_RESUMEN_CHARS]
+    return (body or contenido)[:MAX_RESUMEN_CHARS]
 
 
 def _clean(value: str | None) -> str:
@@ -184,15 +197,15 @@ class TaskLifecycle:
                 .select_related('incidencia__activo_reportado', 'incidencia__reportante', 'solicitada_por')
                 .filter(pk=tarea_id, rama=rama).first()
             )
-            if tarea is None or tarea.estado != TAREA_PENDIENTE:
+            if tarea is None or tarea.estado != EstadoTareaIA.PENDIENTE:
                 return None
-            tarea.estado, tarea.iniciada_en = TAREA_PROCESANDO, timezone.now()
+            tarea.estado, tarea.iniciada_en = EstadoTareaIA.PROCESANDO, timezone.now()
             tarea.save(update_fields=['estado', 'iniciada_en'])
             return tarea
 
     @staticmethod
     def complete(tarea: TareaIA, *, proveedor: str, modelo: str) -> None:
-        tarea.estado, tarea.terminada_en = TAREA_COMPLETADA, timezone.now()
+        tarea.estado, tarea.terminada_en = EstadoTareaIA.COMPLETADA, timezone.now()
         tarea.proveedor, tarea.modelo = proveedor, modelo
         tarea.error_codigo = tarea.error_detalle = None
         tarea.save(update_fields=['estado', 'terminada_en', 'proveedor', 'modelo', 'error_codigo', 'error_detalle'])
@@ -200,8 +213,8 @@ class TaskLifecycle:
     @staticmethod
     def fail(tarea: TareaIA, exc: BaseException) -> None:
         TareaIA.objects.filter(pk=tarea.pk).update(
-            estado=TAREA_ERROR, terminada_en=timezone.now(),
-            error_codigo=type(exc).__name__[:100], error_detalle=str(exc)[:MAX_ERROR_CHARS],
+            estado=EstadoTareaIA.ERROR, terminada_en=timezone.now(),
+            error_codigo=type(exc).__name__[:ERROR_CODIGO_MAX_CHARS], error_detalle=str(exc)[:MAX_ERROR_CHARS],
         )
 
 
@@ -209,9 +222,9 @@ def escalate_if_analyzing(incidencia, actor, motivo: str) -> bool:
     """Deriva a PENDIENTE_ATENCION_HUMANA solo si la incidencia sigue en análisis (no pisa EN_ATENCION ni CERRADA)."""
     with transaction.atomic():
         locked, estado = IncidentService._lock_with_status(incidencia.pk)
-        if estado not in (REGISTRADA, EN_ANALISIS):
+        if estado not in (EstadoIncidencia.REGISTRADA, EstadoIncidencia.EN_ANALISIS):
             return False
-        IncidentService.transition(locked, PENDIENTE_ATENCION_HUMANA, actor, motivo)
+        IncidentService.transition(locked, EstadoIncidencia.PENDIENTE_ATENCION_HUMANA, actor, motivo)
         return True
 
 
@@ -227,7 +240,7 @@ class OperationalRAGService:
             for n, hit in enumerate(hits[:3], start=1)
         ]
         return OperationalGuidanceLLMOutput(
-            tipo=SUGERENCIA,
+            tipo=TipoOrientacion.SUGERENCIA,
             resumen=f'Se encontraron {len(pasos)} lineamiento(s) autorizado(s) aplicables a «{incidencia.titulo}».',
             advertencia='Orientación generada en modo extractivo local (sin proveedor de IA configurado); '
                         'si los pasos no resuelven el caso, indícalo para escalarlo a un analista.',
@@ -237,14 +250,14 @@ class OperationalRAGService:
 
     @classmethod
     def run(cls, tarea_id: int) -> dict:
-        tarea = TaskLifecycle.claim(tarea_id, 'OPERATIVA')
+        tarea = TaskLifecycle.claim(tarea_id, RamaTareaIA.OPERATIVA)
         if tarea is None:
             return {'status': 'skipped', 'tarea_id': tarea_id}
         incidencia, actor = tarea.incidencia, tarea.solicitada_por
         try:
             if SENSITIVE_RE.search(f'{incidencia.titulo} {incidencia.descripcion}'):
                 return cls._persist(
-                    tarea, tipo=SENSIBLE, resumen=SENSIBLE_RESUMEN, advertencia=SENSIBLE_ADVERTENCIA, pasos=[], citas=[],
+                    tarea, tipo=TipoOrientacion.SENSIBLE, resumen=SENSIBLE_RESUMEN, advertencia=SENSIBLE_ADVERTENCIA, pasos=[], citas=[],
                     proveedor=DETERMINISTIC_PROVIDER, modelo='deteccion-sensible-v1',
                     motivo='Derivación automática: reporte sensible de seguridad que requiere contención por un analista.',
                 )
@@ -265,16 +278,16 @@ class OperationalRAGService:
             pasos = [strip_invalid_citations(p.instruccion, valid) for p in sorted(output.pasos, key=lambda p: p.orden)]
             citas = [(n, hits[n - 1].fragmento) for n in valid]
 
-            if output.tipo == SENSIBLE:
+            if output.tipo == TipoOrientacion.SENSIBLE:
                 return cls._persist(
-                    tarea, tipo=SENSIBLE, resumen=output.resumen, advertencia=output.advertencia or SENSIBLE_ADVERTENCIA,
+                    tarea, tipo=TipoOrientacion.SENSIBLE, resumen=output.resumen, advertencia=output.advertencia or SENSIBLE_ADVERTENCIA,
                     pasos=pasos, citas=citas, proveedor=client.provider_label, modelo=client.model_label,
                     motivo='Derivación automática: el modelo clasificó el reporte como incidente de seguridad sensible.',
                 )
             if not citas:  # Sugerencia sin ninguna cita verificable: se trata como sin respaldo.
                 return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
             return cls._persist(
-                tarea, tipo=SUGERENCIA, resumen=output.resumen, advertencia=output.advertencia, pasos=[p for p in pasos if p],
+                tarea, tipo=TipoOrientacion.SUGERENCIA, resumen=output.resumen, advertencia=output.advertencia, pasos=[p for p in pasos if p],
                 citas=citas, proveedor=client.provider_label, modelo=client.model_label, motivo=None,
             )
         except Exception as exc:  # INV-01: la incidencia nunca queda huérfana.
@@ -289,7 +302,7 @@ class OperationalRAGService:
     @classmethod
     def _sin_respaldo(cls, tarea, *, proveedor: str, modelo: str) -> dict:
         return cls._persist(
-            tarea, tipo=SIN_RESPALDO, resumen=SIN_RESPALDO_RESUMEN, advertencia=SIN_RESPALDO_ADVERTENCIA, pasos=[], citas=[],
+            tarea, tipo=TipoOrientacion.SIN_RESPALDO, resumen=SIN_RESPALDO_RESUMEN, advertencia=SIN_RESPALDO_ADVERTENCIA, pasos=[], citas=[],
             proveedor=proveedor, modelo=modelo,
             motivo='Sin respaldo documental autorizado sobre el umbral de similitud; escalado a Analista N2.',
         )
@@ -378,7 +391,7 @@ class StrategicRiskAnalysisService:
     def find_best_match(cls, analisis: AnalisisIncidencia, cfg) -> GroupingMatch | None:
         """Mayor similitud coseno contra los análisis vinculados (no retirados) a versiones de riesgo existentes."""
         vinculos = list(
-            VersionIncidencia.objects.exclude(estado=VINCULO_RETIRADA)
+            VersionIncidencia.objects.exclude(estado=EstadoVinculo.RETIRADA)
             .exclude(analisis__tarea__incidencia_id=analisis.tarea.incidencia_id)
             .select_related('analisis__tarea__incidencia', 'version__riesgo')
         )
@@ -393,7 +406,7 @@ class StrategicRiskAnalysisService:
 
     @classmethod
     def run(cls, tarea_id: int) -> dict:
-        tarea = TaskLifecycle.claim(tarea_id, RAMA_ESTRATEGICA)
+        tarea = TaskLifecycle.claim(tarea_id, RamaTareaIA.ESTRATEGICA)
         if tarea is None:
             return {'status': 'skipped', 'tarea_id': tarea_id}
         incidencia = tarea.incidencia
@@ -434,7 +447,7 @@ class StrategicRiskAnalysisService:
             )
             match = cls.find_best_match(analisis, cfg)
             version_fields = {
-                'origen': ORIGEN_IA,
+                'origen': OrigenVersionRiesgo.IA,
                 'creada_por': tarea.solicitada_por,
                 'titulo': output.riesgo_candidato[:255],
                 'descripcion': output.descripcion_riesgo,
@@ -442,7 +455,7 @@ class StrategicRiskAnalysisService:
                 'vulnerabilidad': analisis.vulnerabilidad,
                 'consecuencia': analisis.consecuencia,
                 'recomendacion': recomendacion,
-                'origen_recomendacion': ('NORMATIVA_INTERNA' if citas else ORIGEN_IA) if recomendacion else None,
+                'origen_recomendacion': (OrigenRecomendacion.NORMATIVA_INTERNA if citas else OrigenRecomendacion.IA) if recomendacion else None,
             }
             referencia = f'INC-{tarea.incidencia_id:04d}'
 
@@ -454,19 +467,19 @@ class StrategicRiskAnalysisService:
                 if DecisionRiesgo.objects.filter(version=latest).exists():
                     # Recurrencia sobre un riesgo ya decidido: nueva propuesta de versión para alertar al analista.
                     version = VersionRiesgo.objects.create(riesgo=riesgo, numero=latest.numero + 1, **version_fields)
-                    caso, nueva_version = 'RECURRENCIA_NUEVA_VERSION', True
+                    caso, nueva_version = CasoAgrupacion.RECURRENCIA_NUEVA_VERSION, True
                 else:
-                    version, caso, nueva_version = latest, 'AGRUPACION', False
+                    version, caso, nueva_version = latest, CasoAgrupacion.AGRUPACION, False
                 similitud = match.score
             else:
                 riesgo = Riesgo.objects.create(codigo='RSG-PENDIENTE')
                 riesgo.codigo = f'RSG-{riesgo.id:04d}'
                 riesgo.save(update_fields=['codigo'])
                 version = VersionRiesgo.objects.create(riesgo=riesgo, numero=1, **version_fields)
-                caso, nueva_version, similitud, motivo = 'NUEVO_RIESGO', True, 1.0, 'Incidencia de origen.'
+                caso, nueva_version, similitud, motivo = CasoAgrupacion.NUEVO_RIESGO, True, SIMILITUD_ORIGEN, 'Incidencia de origen.'
 
             VersionIncidencia.objects.create(
-                version=version, analisis=analisis, estado=VINCULO_SUGERIDA,
+                version=version, analisis=analisis, estado=EstadoVinculo.SUGERIDA,
                 similitud=Decimal(f'{min(max(similitud, 0.0), 1.0):.4f}'), motivo_similitud=motivo,
                 extracto_reporte=output.extracto_reporte[:2000],
             )
@@ -476,7 +489,7 @@ class StrategicRiskAnalysisService:
                 ])
             TaskLifecycle.complete(tarea, proveedor=client.provider_label, modelo=client.model_label)
             AuditService.log(
-                accion='ANALIZAR_RIESGO_INCIDENCIA', incidencia=tarea.incidencia, version_riesgo=version,
+                accion=AccionAuditoria.ANALIZAR_RIESGO_INCIDENCIA, incidencia=tarea.incidencia, version_riesgo=version,
                 detalle=f'{referencia} caso={caso} riesgo={riesgo.codigo} v{version.numero} similitud={similitud:.4f} '
                         f'citas={len(citas) if nueva_version else 0} proveedor={client.provider_label}',
             )
@@ -491,20 +504,20 @@ class StrategicRetryService:
     @transaction.atomic
     def retry(incidencia, actor) -> TareaIA:
         IncidentService._lock_with_status(incidencia.pk)
-        anterior = latest_task(incidencia, RAMA_ESTRATEGICA)
-        if anterior is None or anterior.estado != TAREA_ERROR:
+        anterior = latest_task(incidencia, RamaTareaIA.ESTRATEGICA)
+        if anterior is None or anterior.estado != EstadoTareaIA.ERROR:
             estado = anterior.estado if anterior else 'inexistente'
-            raise ValidationError({'tarea_ia': f'Solo se reintenta un análisis estratégico en ERROR (estado actual: {estado}).'})
+            raise ValidationError({'tarea_ia': msg.REINTENTO_FUERA_DE_ESTADO.format(estado=estado)})
         cfg = get_active_config()
         intento = anterior.intento + 1
         tarea = TareaIA.objects.create(
-            incidencia=incidencia, rama=RAMA_ESTRATEGICA, intento=intento,
-            clave_idempotencia=f'inc-{incidencia.id}-est-v{intento}', estado=TAREA_PENDIENTE,
+            incidencia=incidencia, rama=RamaTareaIA.ESTRATEGICA, intento=intento,
+            clave_idempotencia=f'inc-{incidencia.id}-est-v{intento}', estado=EstadoTareaIA.PENDIENTE,
             proveedor=getattr(cfg, 'proveedor_llm', None), modelo=getattr(cfg, 'modelo_llm', None),
             version_configuracion=getattr(cfg, 'version_configuracion', None), solicitada_por=actor,
         )
         AuditService.log(
-            actor=actor, incidencia=incidencia, accion='REINTENTAR_ANALISIS_ESTRATEGICO',
+            actor=actor, incidencia=incidencia, accion=AccionAuditoria.REINTENTAR_ANALISIS_ESTRATEGICO,
             detalle=f'tarea_anterior={anterior.id} ({anterior.error_codigo}) nueva_tarea={tarea.id} intento={intento}',
         )
         tarea_id = tarea.id
@@ -515,13 +528,6 @@ class StrategicRetryService:
 # ---------------------------------------------------------------------------
 # Gobierno de riesgos (v0.6): depuración de agrupaciones, evaluación 5x5 y decisiones ISO/IEC 27005
 # ---------------------------------------------------------------------------
-ESTADO_PENDIENTE = 'PENDIENTE'
-VINCULO_CONFIRMADA = 'CONFIRMADA'
-ORIGEN_ANALISTA = 'ANALISTA'
-VALIDADA, CORREGIDA, RECHAZADA = 'VALIDADA', 'CORREGIDA', 'RECHAZADA'
-MIN_JUSTIFICACION = 15
-MIN_JUSTIFICACION_CAMBIO_ACTIVO = 10
-CORRECTABLE_FIELDS = ('titulo', 'descripcion', 'amenaza', 'vulnerabilidad', 'consecuencia', 'recomendacion')
 
 
 def risk_version_queryset():
@@ -537,8 +543,8 @@ def risk_version_queryset():
             'evaluacion__celda__nivel', 'evaluacion__celda__matriz', 'evaluacion__evaluador', 'decision__analista',
         )
         .annotate(
-            estado=Coalesce('decision__accion', Value(ESTADO_PENDIENTE), output_field=CharField()),
-            posible_recurrencia=Exists(anteriores.filter(decision__accion=VALIDADA)),
+            estado=Coalesce('decision__accion', Value(EstadoVersionRiesgo.PENDIENTE), output_field=CharField()),
+            posible_recurrencia=Exists(anteriores.filter(decision__accion=AccionDecisionRiesgo.VALIDADA)),
             version_anterior_id=Subquery(anteriores.order_by('-numero').values('id')[:1]),
         )
         .prefetch_related(
@@ -555,7 +561,7 @@ class RiskGovernanceDecisionService:
     def _lock_pending(version: VersionRiesgo) -> VersionRiesgo:
         locked = VersionRiesgo.objects.select_for_update(of=('self',)).select_related('riesgo').get(pk=version.pk)
         if DecisionRiesgo.objects.filter(version=locked).exists():
-            raise ValidationError({'version': 'Esta versión de riesgo ya cuenta con una decisión registrada y es inmutable.'})
+            raise ValidationError({'version': msg.VERSION_YA_DECIDIDA})
         return locked
 
     @staticmethod
@@ -573,7 +579,7 @@ class RiskGovernanceDecisionService:
             .filter(version=version, analisis_id=analisis_id).first()
         )
         if link is None:
-            raise NotFound('La incidencia no está vinculada a esta versión de riesgo.')
+            raise NotFound(msg.INCIDENCIA_NO_VINCULADA)
         return link
 
     # -- Depuración de la agrupación ------------------------------------
@@ -582,15 +588,15 @@ class RiskGovernanceDecisionService:
     def remove_incident(cls, *, version, analisis_id: int, actor, motivo_retiro: str) -> VersionRiesgo:
         version = cls._lock_pending(version)
         link = cls._link(version, analisis_id)
-        if link.estado == VINCULO_RETIRADA:
-            raise ValidationError({'estado': 'La incidencia ya fue retirada de la agrupación.'})
+        if link.estado == EstadoVinculo.RETIRADA:
+            raise ValidationError({'estado': msg.INCIDENCIA_YA_RETIRADA})
         # La fila histórica nunca se elimina: se marca RETIRADA con motivo y revisor.
         VersionIncidencia.objects.filter(version=version, analisis_id=analisis_id).update(
-            estado=VINCULO_RETIRADA, motivo_retiro=motivo_retiro, revisada_por=actor, revisada_en=timezone.now(),
+            estado=EstadoVinculo.RETIRADA, motivo_retiro=motivo_retiro, revisada_por=actor, revisada_en=timezone.now(),
         )
         reset = cls._reset_grouping_confirmation(version)
         AuditService.log(
-            actor=actor, accion='RETIRAR_INCIDENCIA_AGRUPACION', version_riesgo=version, incidencia=link.analisis.tarea.incidencia,
+            actor=actor, accion=AccionAuditoria.RETIRAR_INCIDENCIA_AGRUPACION, version_riesgo=version, incidencia=link.analisis.tarea.incidencia,
             detalle=f'{version.riesgo.codigo} v{version.numero} INC-{link.analisis.tarea.incidencia_id:04d} '
                     f'motivo={motivo_retiro} confirmacion_reiniciada={reset}',
         )
@@ -601,14 +607,14 @@ class RiskGovernanceDecisionService:
     def restore_incident(cls, *, version, analisis_id: int, actor, observacion: str = '') -> VersionRiesgo:
         version = cls._lock_pending(version)
         link = cls._link(version, analisis_id)
-        if link.estado != VINCULO_RETIRADA:
-            raise ValidationError({'estado': 'Solo se restauran incidencias retiradas de la agrupación.'})
+        if link.estado != EstadoVinculo.RETIRADA:
+            raise ValidationError({'estado': msg.SOLO_RESTAURAR_RETIRADAS})
         VersionIncidencia.objects.filter(version=version, analisis_id=analisis_id).update(
-            estado=VINCULO_SUGERIDA, motivo_retiro=None, revisada_por=actor, revisada_en=timezone.now(),
+            estado=EstadoVinculo.SUGERIDA, motivo_retiro=None, revisada_por=actor, revisada_en=timezone.now(),
         )
         reset = cls._reset_grouping_confirmation(version)
         AuditService.log(
-            actor=actor, accion='RESTAURAR_INCIDENCIA_AGRUPACION', version_riesgo=version, incidencia=link.analisis.tarea.incidencia,
+            actor=actor, accion=AccionAuditoria.RESTAURAR_INCIDENCIA_AGRUPACION, version_riesgo=version, incidencia=link.analisis.tarea.incidencia,
             detalle=f'{version.riesgo.codigo} v{version.numero} INC-{link.analisis.tarea.incidencia_id:04d} '
                     f'motivo_retiro_previo={link.motivo_retiro} observacion={observacion or "-"} confirmacion_reiniciada={reset}',
         )
@@ -618,9 +624,9 @@ class RiskGovernanceDecisionService:
     @transaction.atomic
     def confirm_grouping(cls, *, version, actor, activo_confirmado, justificacion_cambio_activo: str = '') -> VersionRiesgo:
         version = cls._lock_pending(version)
-        incluidas = VersionIncidencia.objects.filter(version=version).exclude(estado=VINCULO_RETIRADA)
+        incluidas = VersionIncidencia.objects.filter(version=version).exclude(estado=EstadoVinculo.RETIRADA)
         if not incluidas.exists():
-            raise ValidationError({'agrupacion': 'No hay incidencias incluidas en la agrupación; no puede confirmarse.'})
+            raise ValidationError({'agrupacion': msg.AGRUPACION_VACIA})
         reportados = set(
             incluidas.exclude(analisis__tarea__incidencia__activo_reportado__isnull=True)
             .values_list('analisis__tarea__incidencia__activo_reportado_id', flat=True)
@@ -628,15 +634,14 @@ class RiskGovernanceDecisionService:
         justificacion = (justificacion_cambio_activo or '').strip()
         if reportados and activo_confirmado.id not in reportados and len(justificacion) < MIN_JUSTIFICACION_CAMBIO_ACTIVO:
             raise ValidationError({
-                'justificacion_cambio_activo': 'El activo confirmado difiere del reportado en las incidencias; '
-                                               'justifique el cambio (mínimo 10 caracteres).'
+                'justificacion_cambio_activo': msg.CAMBIO_ACTIVO_SIN_JUSTIFICAR.format(minimo=MIN_JUSTIFICACION_CAMBIO_ACTIVO),
             })
         ahora = timezone.now()
         version.activo_confirmado, version.agrupacion_confirmada_por, version.agrupacion_confirmada_en = activo_confirmado, actor, ahora
         version.save(update_fields=['activo_confirmado', 'agrupacion_confirmada_por', 'agrupacion_confirmada_en'])
-        confirmadas = incluidas.update(estado=VINCULO_CONFIRMADA, revisada_por=actor, revisada_en=ahora)
+        confirmadas = incluidas.update(estado=EstadoVinculo.CONFIRMADA, revisada_por=actor, revisada_en=ahora)
         AuditService.log(
-            actor=actor, accion='CONFIRMAR_AGRUPACION_RIESGO', version_riesgo=version, activo=activo_confirmado,
+            actor=actor, accion=AccionAuditoria.CONFIRMAR_AGRUPACION_RIESGO, version_riesgo=version, activo=activo_confirmado,
             detalle=f'{version.riesgo.codigo} v{version.numero} activo={activo_confirmado.codigo} incidencias={confirmadas}'
                     + (f' justificacion_cambio_activo={justificacion}' if justificacion else ''),
         )
@@ -649,16 +654,16 @@ class RiskGovernanceDecisionService:
         version = cls._lock_pending(version)
         matriz = ConfiguracionMatriz.objects.filter(activa=True).order_by('-creada_en', '-id').first()
         if matriz is None:
-            raise ValidationError({'matriz': 'No existe una configuración de matriz activa.'})
+            raise ValidationError({'matriz': msg.SIN_MATRIZ_ACTIVA})
         celda = CeldaMatriz.objects.select_related('nivel').filter(matriz=matriz, probabilidad=probabilidad, impacto=impacto).first()
         if celda is None:
-            raise ValidationError({'matriz': 'No se encontró la celda correspondiente en la matriz activa.'})
+            raise ValidationError({'matriz': msg.CELDA_NO_ENCONTRADA})
         evaluacion, creada = EvaluacionRiesgo.objects.update_or_create(
             version=version,
             defaults={'celda': celda, 'evaluador': actor, 'justificacion': justificacion.strip(), 'evaluada_en': timezone.now()},
         )
         AuditService.log(
-            actor=actor, accion='EVALUAR_RIESGO', version_riesgo=version, matriz=matriz,
+            actor=actor, accion=AccionAuditoria.EVALUAR_RIESGO, version_riesgo=version, matriz=matriz,
             detalle=f'{version.riesgo.codigo} v{version.numero} P{probabilidad} x I{impacto} = {celda.nivel.codigo} '
                     f'celda={celda.id} matriz={matriz.version} {"nueva" if creada else "reevaluacion"}',
         )
@@ -668,23 +673,21 @@ class RiskGovernanceDecisionService:
     @staticmethod
     def _validate_validation_preconditions(version: VersionRiesgo, data: dict) -> None:
         if not version.activo_confirmado_id or not version.agrupacion_confirmada_por_id:
-            raise ValidationError({'agrupacion': 'Para validar la versión de riesgo debe confirmar primero el activo '
-                                                 'y la agrupación de incidencias.'})
+            raise ValidationError({'agrupacion': msg.VALIDAR_SIN_AGRUPACION})
         evaluacion = EvaluacionRiesgo.objects.filter(version=version).first()
         if not evaluacion or len((evaluacion.justificacion or '').strip()) < MIN_JUSTIFICACION:
-            raise ValidationError({'evaluacion': 'Para validar el riesgo debe existir una evaluación en matriz con su justificación.'})
+            raise ValidationError({'evaluacion': msg.VALIDAR_SIN_EVALUACION})
         sin_fuentes = (data.get('justificacion_sin_fuentes') or '').strip()
         if not CitaVersionRiesgo.objects.filter(version=version).exists() and len(sin_fuentes) < MIN_JUSTIFICACION:
-            raise ValidationError({'justificacion_sin_fuentes': 'La versión no posee fuentes documentales estratégicas citadas. '
-                                                                'Debe registrar justificacion_sin_fuentes (mínimo 15 caracteres).'})
+            raise ValidationError({'justificacion_sin_fuentes': msg.VALIDAR_SIN_FUENTES.format(minimo=MIN_JUSTIFICACION)})
 
     @staticmethod
     def _clone_corrected(version: VersionRiesgo, actor, data: dict) -> VersionRiesgo:
         numero = (VersionRiesgo.objects.filter(riesgo=version.riesgo).aggregate(m=Max('numero'))['m'] or version.numero) + 1
         campos = {f: (data.get(f) or '').strip() or getattr(version, f) for f in CORRECTABLE_FIELDS}
         nueva = VersionRiesgo.objects.create(
-            riesgo=version.riesgo, numero=numero, origen=ORIGEN_ANALISTA, creada_por=actor,
-            origen_recomendacion=ORIGEN_ANALISTA if (data.get('recomendacion') or '').strip() else version.origen_recomendacion,
+            riesgo=version.riesgo, numero=numero, origen=OrigenVersionRiesgo.ANALISTA, creada_por=actor,
+            origen_recomendacion=OrigenRecomendacion.ANALISTA if (data.get('recomendacion') or '').strip() else version.origen_recomendacion,
             activo_confirmado=version.activo_confirmado,
             agrupacion_confirmada_por=version.agrupacion_confirmada_por,
             agrupacion_confirmada_en=version.agrupacion_confirmada_en,
@@ -709,16 +712,16 @@ class RiskGovernanceDecisionService:
     def decide(cls, *, version, actor, data: dict) -> tuple[DecisionRiesgo, VersionRiesgo | None]:
         version = cls._lock_pending(version)
         accion = data['accion']
-        if accion == VALIDADA:
+        if accion == AccionDecisionRiesgo.VALIDADA:
             cls._validate_validation_preconditions(version, data)
         decision = DecisionRiesgo.objects.create(
             version=version, accion=accion, analista=actor,
             observacion=(data.get('observacion') or '').strip() or None,
             justificacion_sin_fuentes=(data.get('justificacion_sin_fuentes') or '').strip() or None,
         )
-        nueva = cls._clone_corrected(version, actor, data) if accion == CORREGIDA else None
+        nueva = cls._clone_corrected(version, actor, data) if accion == AccionDecisionRiesgo.CORREGIDA else None
         AuditService.log(
-            actor=actor, accion='DECIDIR_VERSION_RIESGO', version_riesgo=version, activo=version.activo_confirmado,
+            actor=actor, accion=AccionAuditoria.DECIDIR_VERSION_RIESGO, version_riesgo=version, activo=version.activo_confirmado,
             detalle=f'{version.riesgo.codigo} v{version.numero} accion={accion}'
                     + (f' nueva_version=v{nueva.numero}' if nueva else ''),
         )
@@ -734,7 +737,7 @@ class RiskDashboardAggregationService:
     @classmethod
     def build(cls) -> dict:
         # Equivalente a DISTINCT ON (riesgo_id): última versión VALIDADA y última pendiente por RIESGO.
-        ultima_validada = VersionRiesgo.objects.filter(riesgo_id=OuterRef('id'), decision__accion=VALIDADA).order_by('-numero', '-id')
+        ultima_validada = VersionRiesgo.objects.filter(riesgo_id=OuterRef('id'), decision__accion=AccionDecisionRiesgo.VALIDADA).order_by('-numero', '-id')
         pendiente = VersionRiesgo.objects.filter(riesgo_id=OuterRef('id'), decision__isnull=True).order_by('-numero', '-id')
         riesgos = list(
             Riesgo.objects.annotate(
@@ -748,7 +751,7 @@ class RiskDashboardAggregationService:
             'activo_confirmado', 'evaluacion__celda__nivel', 'decision',
         ).in_bulk([r.vigente_id for r in vigentes])
         incidencias_por_riesgo = dict(
-            VersionIncidencia.objects.exclude(estado=VINCULO_RETIRADA)
+            VersionIncidencia.objects.exclude(estado=EstadoVinculo.RETIRADA)
             .values('version__riesgo_id').annotate(total=Count('analisis__tarea__incidencia_id', distinct=True))
             .values_list('version__riesgo_id', 'total')
         )
@@ -776,7 +779,7 @@ class RiskDashboardAggregationService:
 
         pendientes = VersionRiesgo.objects.filter(decision__isnull=True)
         recurrencia = Exists(VersionRiesgo.objects.filter(
-            riesgo_id=OuterRef('riesgo_id'), numero__lt=OuterRef('numero'), decision__accion=VALIDADA,
+            riesgo_id=OuterRef('riesgo_id'), numero__lt=OuterRef('numero'), decision__accion=AccionDecisionRiesgo.VALIDADA,
         ))
         return {
             'generado_en': timezone.now(),
@@ -787,7 +790,7 @@ class RiskDashboardAggregationService:
             'propuestas_nuevas_agrupaciones': pendientes.filter(agrupacion_confirmada_por__isnull=True).count(),
             'propuestas_pendientes_revision': pendientes.filter(agrupacion_confirmada_por__isnull=False).count(),
             'propuestas_posible_recurrencia': pendientes.filter(recurrencia).count(),
-            'versiones_rechazadas': VersionRiesgo.objects.filter(decision__accion=RECHAZADA).count(),
+            'versiones_rechazadas': VersionRiesgo.objects.filter(decision__accion=AccionDecisionRiesgo.RECHAZADA).count(),
             'incidencias_por_estado': cls._incidents_by_status(),
             'incidencias_por_activo': cls._incidents_by_asset(),
             'serie_incidencias': cls._incident_series(),
@@ -796,7 +799,7 @@ class RiskDashboardAggregationService:
 
     @staticmethod
     def _incidents_by_status() -> dict:
-        conteo = {estado: 0 for estado in ESTADOS_INCIDENCIA}
+        conteo = {estado.value: 0 for estado in EstadoIncidencia}
         filas = (
             Incidencia.objects.annotate(estado_actual=current_status_subquery())
             .values('estado_actual').annotate(total=Count('id')).values_list('estado_actual', 'total')

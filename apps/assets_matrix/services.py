@@ -3,7 +3,9 @@ from django.db import transaction
 from django.db.models import Prefetch
 from rest_framework.exceptions import NotFound, ValidationError
 
+from apps.assets_matrix import messages as msg
 from apps.assets_matrix.models import CeldaMatriz, ConfiguracionMatriz, CriterioImpacto, CriterioProbabilidad
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
 
 ESTADO_PUBLICADA = 'PUBLICADA'
@@ -22,7 +24,7 @@ class MatrixService:
     def get_active(cls) -> ConfiguracionMatriz:
         matriz = cls._with_structure(ConfiguracionMatriz.objects.filter(activa=True)).order_by('-creada_en', '-id').first()
         if matriz is None:
-            raise NotFound('No existe una matriz de riesgo activa.')
+            raise NotFound(msg.SIN_MATRIZ_ACTIVA)
         return matriz
 
     @staticmethod
@@ -43,7 +45,7 @@ class MatrixService:
         criterios_prob = data.get('criterios_probabilidad') or cls._criterios_from(CriterioProbabilidad, anterior)
         criterios_imp = data.get('criterios_impacto') or cls._criterios_from(CriterioImpacto, anterior)
         if not criterios_prob or not criterios_imp:
-            raise ValidationError({'criterios': 'No hay matriz activa de la cual clonar criterios; envíelos explícitamente.'})
+            raise ValidationError({'criterios': msg.SIN_MATRIZ_PARA_CLONAR})
 
         total = ConfiguracionMatriz.objects.count()
         ConfiguracionMatriz.objects.filter(pk__in=[m.pk for m in anteriores]).update(activa=False)
@@ -65,7 +67,7 @@ class MatrixService:
 
         AuditService.log(
             actor=actor,
-            accion='PUBLICAR_CONFIGURACION_MATRIZ',
+            accion=AccionAuditoria.PUBLICAR_CONFIGURACION_MATRIZ,
             matriz=matriz,
             detalle=f'version={matriz.version} anterior={anterior.version if anterior else "-"} celdas={len(data["celdas"])}',
         )

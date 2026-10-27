@@ -13,16 +13,13 @@ import numpy as np
 from django.conf import settings
 from django.utils.text import slugify
 
+from apps.documents_rag.constants import FINALIDADES_ESTRATEGICAS, FINALIDADES_OPERATIVAS, ProcesamientoDocumento
 from apps.documents_rag.embeddings import EmbeddingProviderService
 
 try:  # Bloqueo entre procesos (backend y celery_worker comparten el volumen storage/).
     import fcntl
 except ImportError:  # pragma: no cover - entornos Windows sin contenedor
     fcntl = None
-
-PROCESAMIENTO_AUTORIZADO = 'AUTORIZADO'
-FINALIDADES_OPERATIVAS = ('OPERATIVA', 'AMBAS')
-FINALIDADES_ESTRATEGICAS = ('ESTRATEGICA', 'AMBAS')
 
 
 @dataclass(frozen=True)
@@ -139,7 +136,7 @@ class FaissVectorStore:
         eligible_ids = set(
             FragmentoDocumento.objects.filter(
                 version_documento__activa=True,
-                version_documento__procesamiento=PROCESAMIENTO_AUTORIZADO,
+                version_documento__procesamiento=ProcesamientoDocumento.AUTORIZADO,
                 version_documento__modelo_embedding=cfg.modelo_embedding,
                 version_documento__finalidad__in=list(finalidad_permitida),
             ).values_list('id', flat=True)

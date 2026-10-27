@@ -2,7 +2,18 @@ from django.conf import settings
 from django.core.validators import RegexValidator
 from rest_framework import serializers
 
-FINALIDADES = ['OPERATIVA', 'ESTRATEGICA', 'AMBAS']
+from apps.documents_rag import messages as msg
+from apps.documents_rag.constants import (
+    CODIGO_MIN_LENGTH,
+    PROCESAMIENTOS_INDEXADOS,
+    TITULO_MIN_LENGTH,
+    VERSION_MIN_LENGTH,
+    FinalidadDocumento,
+)
+from apps.documents_rag.models import Documento, VersionDocumento
+from config.constants import BYTES_PER_MB, column_max_length
+
+FINALIDADES = [f.value for f in FinalidadDocumento]
 PDF_MAGIC_BYTES = b'%PDF-'
 
 
@@ -10,12 +21,12 @@ class DocumentUploadInputSerializer(serializers.Serializer):
     """DTO de entrada multipart para la carga de una nueva VERSION_DOCUMENTO."""
 
     codigo = serializers.CharField(
-        min_length=2, max_length=50,
-        validators=[RegexValidator(r'^[A-Za-z0-9][A-Za-z0-9._-]*$', 'Use letras, dígitos, punto, guion o guion bajo (ej. POL-SGSI-01).')],
+        min_length=CODIGO_MIN_LENGTH, max_length=column_max_length(Documento, 'codigo'),
+        validators=[RegexValidator(r'^[A-Za-z0-9][A-Za-z0-9._-]*$', msg.CODIGO_FORMATO)],
     )
-    titulo = serializers.CharField(min_length=5, max_length=255)
+    titulo = serializers.CharField(min_length=TITULO_MIN_LENGTH, max_length=column_max_length(Documento, 'titulo'))
     descripcion = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    version = serializers.CharField(min_length=1, max_length=50)
+    version = serializers.CharField(min_length=VERSION_MIN_LENGTH, max_length=column_max_length(VersionDocumento, 'version'))
     finalidad = serializers.ChoiceField(choices=FINALIDADES)
     archivo = serializers.FileField()
 
@@ -27,16 +38,14 @@ class DocumentUploadInputSerializer(serializers.Serializer):
 
     def validate_archivo(self, archivo):
         if archivo.size > settings.MAX_PDF_UPLOAD_BYTES:
-            raise serializers.ValidationError(
-                f'El PDF supera el tamaño máximo de {settings.MAX_PDF_UPLOAD_BYTES // (1024 * 1024)} MB.'
-            )
+            raise serializers.ValidationError(msg.PDF_DEMASIADO_GRANDE.format(mb=settings.MAX_PDF_UPLOAD_BYTES // BYTES_PER_MB))
         if not archivo.name.lower().endswith('.pdf'):
-            raise serializers.ValidationError('Solo se permiten archivos .pdf.')
+            raise serializers.ValidationError(msg.SOLO_PDF)
         archivo.seek(0)
         header = archivo.read(len(PDF_MAGIC_BYTES))
         archivo.seek(0)
         if header != PDF_MAGIC_BYTES:
-            raise serializers.ValidationError('El archivo no es un PDF válido (firma %PDF- ausente).')
+            raise serializers.ValidationError(msg.PDF_INVALIDO)
         return archivo
 
 
@@ -75,7 +84,7 @@ class VersionDocumentoOutputSerializer(serializers.Serializer):
 
     def get_requiere_reindexacion(self, obj) -> bool:
         actual = self.context.get('modelo_embedding_actual')
-        return bool(actual) and obj.procesamiento in ('PENDIENTE_AUTORIZACION', 'AUTORIZADO') and obj.modelo_embedding != actual
+        return bool(actual) and obj.procesamiento in PROCESAMIENTOS_INDEXADOS and obj.modelo_embedding != actual
 
     def get_autorizada_por_nombre(self, obj) -> str | None:
         return obj.autorizada_por.nombre_completo if obj.autorizada_por else None

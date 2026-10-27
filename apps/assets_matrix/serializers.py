@@ -1,8 +1,9 @@
 from rest_framework import serializers
 
-from apps.assets_matrix.models import Activo, NivelRiesgo, TipoActivo
-
-MATRIX_SIZE = 5
+from apps.assets_matrix import messages as msg
+from apps.assets_matrix.constants import CRITICIDAD_MAX, CRITICIDAD_MIN, MATRIX_MIN_LEVEL, MATRIX_SIZE
+from apps.assets_matrix.models import Activo, ConfiguracionMatriz, CriterioProbabilidad, NivelRiesgo, TipoActivo
+from config.constants import column_max_length
 
 
 # ---------------------------------------------------------------------------
@@ -18,10 +19,10 @@ class ActivoInputSerializer(serializers.Serializer):
     """DTO de entrada de ACTIVO (POST completo / PATCH parcial). Nunca se elimina: se desactiva."""
 
     tipo_id = serializers.PrimaryKeyRelatedField(source='tipo', queryset=TipoActivo.objects.filter(activo=True))
-    codigo = serializers.CharField(max_length=50)
-    nombre = serializers.CharField(max_length=150)
+    codigo = serializers.CharField(max_length=column_max_length(Activo, 'codigo'))
+    nombre = serializers.CharField(max_length=column_max_length(Activo, 'nombre'))
     descripcion = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    criticidad = serializers.IntegerField(min_value=1, max_value=4, required=False, allow_null=True)
+    criticidad = serializers.IntegerField(min_value=CRITICIDAD_MIN, max_value=CRITICIDAD_MAX, required=False, allow_null=True)
     activo = serializers.BooleanField(required=False, default=True)
 
     def validate_codigo(self, value: str) -> str:
@@ -30,7 +31,7 @@ class ActivoInputSerializer(serializers.Serializer):
         if self.instance is not None:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('Ya existe un activo con este código.')
+            raise serializers.ValidationError(msg.ACTIVO_CODIGO_DUPLICADO)
         return codigo
 
     def create(self, validated_data):
@@ -99,21 +100,21 @@ class MatrizActivaOutputSerializer(serializers.Serializer):
 
 
 class CriterioInputSerializer(serializers.Serializer):
-    valor = serializers.IntegerField(min_value=1, max_value=MATRIX_SIZE)
-    nombre = serializers.CharField(max_length=100)
+    valor = serializers.IntegerField(min_value=MATRIX_MIN_LEVEL, max_value=MATRIX_SIZE)
+    nombre = serializers.CharField(max_length=column_max_length(CriterioProbabilidad, 'nombre'))
     descripcion = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
 class CeldaInputSerializer(serializers.Serializer):
-    probabilidad = serializers.IntegerField(min_value=1, max_value=MATRIX_SIZE)
-    impacto = serializers.IntegerField(min_value=1, max_value=MATRIX_SIZE)
+    probabilidad = serializers.IntegerField(min_value=MATRIX_MIN_LEVEL, max_value=MATRIX_SIZE)
+    impacto = serializers.IntegerField(min_value=MATRIX_MIN_LEVEL, max_value=MATRIX_SIZE)
     nivel_codigo = serializers.SlugRelatedField(source='nivel', slug_field='codigo', queryset=NivelRiesgo.objects.all())
 
 
 def _validate_criterios(value: list[dict]) -> list[dict]:
     valores = sorted(c['valor'] for c in value)
-    if valores != list(range(1, MATRIX_SIZE + 1)):
-        raise serializers.ValidationError(f'Debe definir exactamente los valores 1..{MATRIX_SIZE} sin repetir.')
+    if valores != list(range(MATRIX_MIN_LEVEL, MATRIX_SIZE + 1)):
+        raise serializers.ValidationError(msg.CRITERIOS_INCOMPLETOS.format(maximo=MATRIX_SIZE))
     return sorted(value, key=lambda c: c['valor'])
 
 
@@ -123,7 +124,7 @@ class PublishMatrixInputSerializer(serializers.Serializer):
     únicas en rango 1..5. Los criterios son opcionales: si se omiten se clonan desde la matriz activa.
     """
 
-    nombre = serializers.CharField(max_length=100, required=False)
+    nombre = serializers.CharField(max_length=column_max_length(ConfiguracionMatriz, 'nombre'), required=False)
     criterios_probabilidad = CriterioInputSerializer(many=True, required=False)
     criterios_impacto = CriterioInputSerializer(many=True, required=False)
     celdas = CeldaInputSerializer(many=True)
@@ -137,7 +138,5 @@ class PublishMatrixInputSerializer(serializers.Serializer):
     def validate_celdas(self, value):
         coordenadas = {(c['probabilidad'], c['impacto']) for c in value}
         if len(value) != MATRIX_SIZE ** 2 or len(coordenadas) != MATRIX_SIZE ** 2:
-            raise serializers.ValidationError(
-                f'La grilla debe contener exactamente {MATRIX_SIZE ** 2} celdas con coordenadas (probabilidad, impacto) únicas.'
-            )
+            raise serializers.ValidationError(msg.GRILLA_INCOMPLETA.format(celdas=MATRIX_SIZE ** 2))
         return value

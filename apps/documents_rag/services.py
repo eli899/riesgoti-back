@@ -15,19 +15,15 @@ from django.utils.text import get_valid_filename, slugify
 from rest_framework.exceptions import ValidationError
 
 from apps.ai_config.models import ConfiguracionIARAG
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
+from apps.documents_rag import messages as msg
 from apps.documents_rag.chunking import StructuredMarkdownPDFChunker, build_segmentation_label
+from apps.documents_rag.constants import PROCESAMIENTOS_INDEXADOS, ProcesamientoDocumento
 from apps.documents_rag.embeddings import EmbeddingProviderService, resolve_embedding_settings
 from apps.documents_rag.faiss_store import FaissVectorStore
 from apps.documents_rag.models import Documento, FragmentoDocumento, VersionDocumento
-
-PROCESANDO = 'PROCESANDO'
-PENDIENTE_AUTORIZACION = 'PENDIENTE_AUTORIZACION'
-AUTORIZADO = 'AUTORIZADO'
-ERROR = 'ERROR'
-
-HASH_BLOCK_BYTES = 64 * 1024
-MAX_ERROR_CHARS = 2000
+from config.constants import IO_BLOCK_BYTES, MAX_ERROR_CHARS
 
 
 def get_active_ai_config() -> ConfiguracionIARAG | None:
@@ -46,7 +42,7 @@ class DocumentIngestionService:
     def _sha256(archivo) -> str:
         digest = hashlib.sha256()
         archivo.seek(0)
-        for block in archivo.chunks(HASH_BLOCK_BYTES):
+        for block in archivo.chunks(IO_BLOCK_BYTES):
             digest.update(block)
         archivo.seek(0)
         return digest.hexdigest()
@@ -61,7 +57,7 @@ class DocumentIngestionService:
         destino.parent.mkdir(parents=True, exist_ok=True)
         archivo.seek(0)
         with open(destino, 'wb') as handle:
-            for block in archivo.chunks(HASH_BLOCK_BYTES):
+            for block in archivo.chunks(IO_BLOCK_BYTES):
                 handle.write(block)
         return clave, True
 
@@ -84,10 +80,10 @@ class DocumentIngestionService:
                     documento.save()
 
                 if documento.versiones.filter(version=data['version']).exists():
-                    raise ValidationError({'version': f'El documento {documento.codigo} ya tiene la versión {data["version"]}.'})
+                    raise ValidationError({'version': msg.VERSION_DUPLICADA.format(codigo=documento.codigo, version=data['version'])})
                 duplicada = documento.versiones.filter(sha256=sha256).first()
                 if duplicada:
-                    raise ValidationError({'archivo': f'Este PDF ya fue cargado como la versión {duplicada.version}.'})
+                    raise ValidationError({'archivo': msg.PDF_DUPLICADO.format(version=duplicada.version)})
 
                 version = VersionDocumento.objects.create(
                     documento=documento,
@@ -95,12 +91,12 @@ class DocumentIngestionService:
                     clave_archivo=clave,
                     sha256=sha256,
                     cargada_por=actor,
-                    procesamiento=PROCESANDO,
+                    procesamiento=ProcesamientoDocumento.PROCESANDO,
                     finalidad=data['finalidad'],
                     activa=False,
                 )
                 AuditService.log(
-                    actor=actor, accion='CARGAR_VERSION_DOCUMENTO', version_documento=version,
+                    actor=actor, accion=AccionAuditoria.CARGAR_VERSION_DOCUMENTO, version_documento=version,
                     detalle=f'codigo={documento.codigo} version={version.version} sha256={sha256} finalidad={version.finalidad}',
                 )
                 if enqueue:
@@ -130,7 +126,7 @@ class DocumentIngestionService:
     @classmethod
     def process_version(cls, version_documento_id: int) -> dict:
         version = VersionDocumento.objects.select_related('documento').get(id=version_documento_id)
-        if version.procesamiento != PROCESANDO:
+        if version.procesamiento != ProcesamientoDocumento.PROCESANDO:
             return {'status': 'skipped', 'version_id': version.id, 'procesamiento': version.procesamiento}
 
         cfg = get_active_ai_config()
@@ -149,7 +145,7 @@ class DocumentIngestionService:
 
             with transaction.atomic():
                 locked = VersionDocumento.objects.select_for_update().get(pk=version.pk)
-                if locked.procesamiento != PROCESANDO:
+                if locked.procesamiento != ProcesamientoDocumento.PROCESANDO:
                     return {'status': 'skipped', 'version_id': version.id, 'procesamiento': locked.procesamiento}
                 previous = list(locked.fragmentos.values_list('id', flat=True))
                 if previous and cls._has_citations(previous):
@@ -166,7 +162,7 @@ class DocumentIngestionService:
                     modelo_embedding=modelo_embedding, fragment_ids=[f.id for f in created], vectors=vectors,
                 )
                 previous_model = locked.modelo_embedding
-                locked.procesamiento = PENDIENTE_AUTORIZACION
+                locked.procesamiento = ProcesamientoDocumento.PENDIENTE_AUTORIZACION
                 locked.modelo_embedding = modelo_embedding
                 locked.version_segmentacion = build_segmentation_label(chunk_size, chunk_overlap)
                 locked.error_procesamiento = None
@@ -180,7 +176,7 @@ class DocumentIngestionService:
         except Exception as exc:
             message = f'{type(exc).__name__}: {exc}'[:MAX_ERROR_CHARS]
             VersionDocumento.objects.filter(pk=version.pk).update(
-                procesamiento=ERROR, activa=False, error_procesamiento=message, ultima_modificacion=timezone.now(),
+                procesamiento=ProcesamientoDocumento.ERROR, activa=False, error_procesamiento=message, ultima_modificacion=timezone.now(),
             )
             return {'status': 'error', 'version_id': version.id, 'error': message}
 
@@ -225,16 +221,16 @@ class DocumentIngestionService:
     @transaction.atomic
     def authorize(cls, actor, version: VersionDocumento) -> VersionDocumento:
         version = cls._lock(version)
-        if version.procesamiento not in (PENDIENTE_AUTORIZACION, AUTORIZADO):
-            raise ValidationError({'procesamiento': f'Solo se autorizan versiones procesadas; estado actual: {version.procesamiento}.'})
+        if version.procesamiento not in PROCESAMIENTOS_INDEXADOS:
+            raise ValidationError({'procesamiento': msg.AUTORIZAR_NO_PROCESADA.format(estado=version.procesamiento)})
         reemplazadas = cls._deactivate_siblings(version)
-        version.procesamiento = AUTORIZADO
+        version.procesamiento = ProcesamientoDocumento.AUTORIZADO
         version.autorizada_por = actor
         version.autorizada_en = timezone.now()
         version.activa = True
         version.save(update_fields=['procesamiento', 'autorizada_por', 'autorizada_en', 'activa', 'ultima_modificacion'])
         AuditService.log(
-            actor=actor, accion='AUTORIZAR_ACTIVAR_VERSION_DOCUMENTO', version_documento=version,
+            actor=actor, accion=AccionAuditoria.AUTORIZAR_ACTIVAR_VERSION_DOCUMENTO, version_documento=version,
             detalle=f'codigo={version.documento.codigo} version={version.version} reemplaza={",".join(reemplazadas) or "-"}',
         )
         return version
@@ -243,15 +239,15 @@ class DocumentIngestionService:
     @transaction.atomic
     def activate(cls, actor, version: VersionDocumento) -> VersionDocumento:
         version = cls._lock(version)
-        if version.procesamiento != AUTORIZADO:
-            raise ValidationError({'procesamiento': 'Solo una versión AUTORIZADA puede reactivarse.'})
+        if version.procesamiento != ProcesamientoDocumento.AUTORIZADO:
+            raise ValidationError({'procesamiento': msg.REACTIVAR_NO_AUTORIZADA})
         if version.activa:
             return version
         reemplazadas = cls._deactivate_siblings(version)
         version.activa = True
         version.save(update_fields=['activa', 'ultima_modificacion'])
         AuditService.log(
-            actor=actor, accion='ACTIVAR_VERSION_DOCUMENTO', version_documento=version,
+            actor=actor, accion=AccionAuditoria.ACTIVAR_VERSION_DOCUMENTO, version_documento=version,
             detalle=f'codigo={version.documento.codigo} version={version.version} reemplaza={",".join(reemplazadas) or "-"}',
         )
         return version
@@ -265,7 +261,7 @@ class DocumentIngestionService:
         version.activa = False
         version.save(update_fields=['activa', 'ultima_modificacion'])
         AuditService.log(
-            actor=actor, accion='DESACTIVAR_VERSION_DOCUMENTO', version_documento=version,
+            actor=actor, accion=AccionAuditoria.DESACTIVAR_VERSION_DOCUMENTO, version_documento=version,
             detalle=f'codigo={version.documento.codigo} version={version.version} (fragmentos y citas preservados)',
         )
         return version
@@ -274,18 +270,15 @@ class DocumentIngestionService:
     @transaction.atomic
     def retry(cls, actor, version: VersionDocumento) -> VersionDocumento:
         version = cls._lock(version)
-        if version.procesamiento not in (ERROR, PENDIENTE_AUTORIZACION):
-            raise ValidationError({
-                'procesamiento': 'Solo se re-procesan versiones en ERROR o PENDIENTE_AUTORIZACION '
-                                 '(una versión autorizada se re-indexa, nunca se re-segmenta).'
-            })
+        if version.procesamiento not in (ProcesamientoDocumento.ERROR, ProcesamientoDocumento.PENDIENTE_AUTORIZACION):
+            raise ValidationError({'procesamiento': msg.REPROCESAR_ESTADO_INVALIDO})
         if version.autorizada_en is not None:
-            raise ValidationError({'procesamiento': 'Una versión que ya fue autorizada no puede re-segmentarse (INV-04).'})
-        version.procesamiento = PROCESANDO
+            raise ValidationError({'procesamiento': msg.REPROCESAR_AUTORIZADA})
+        version.procesamiento = ProcesamientoDocumento.PROCESANDO
         version.error_procesamiento = None
         version.save(update_fields=['procesamiento', 'error_procesamiento', 'ultima_modificacion'])
         AuditService.log(
-            actor=actor, accion='REPROCESAR_VERSION_DOCUMENTO', version_documento=version,
+            actor=actor, accion=AccionAuditoria.REPROCESAR_VERSION_DOCUMENTO, version_documento=version,
             detalle=f'codigo={version.documento.codigo} version={version.version}',
         )
         cls.enqueue_processing(version)
@@ -297,11 +290,11 @@ class DocumentIngestionService:
         from apps.documents_rag.tasks import reindex_version_task
 
         version = cls._lock(version)
-        if version.procesamiento not in (PENDIENTE_AUTORIZACION, AUTORIZADO):
-            raise ValidationError({'procesamiento': 'Solo se re-indexan versiones procesadas (PENDIENTE_AUTORIZACION o AUTORIZADO).'})
+        if version.procesamiento not in PROCESAMIENTOS_INDEXADOS:
+            raise ValidationError({'procesamiento': msg.REINDEXAR_NO_PROCESADA})
         _, modelo_actual, _ = resolve_embedding_settings(get_active_ai_config())
         AuditService.log(
-            actor=actor, accion='REINDEXAR_VERSION_DOCUMENTO', version_documento=version,
+            actor=actor, accion=AccionAuditoria.REINDEXAR_VERSION_DOCUMENTO, version_documento=version,
             detalle=f'codigo={version.documento.codigo} version={version.version} '
                     f'modelo_anterior={version.modelo_embedding} modelo_nuevo={modelo_actual}',
         )

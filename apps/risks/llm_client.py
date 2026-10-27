@@ -8,6 +8,7 @@ from typing import Callable, TypeVar
 from django.conf import settings
 from pydantic import BaseModel
 
+from apps.ai_config.constants import ProveedorLlm
 from apps.ai_config.crypto import EnvelopeCryptoService
 
 DETERMINISTIC_PROVIDER = 'DETERMINISTA_LOCAL'
@@ -28,9 +29,9 @@ class LLMClient:
 
     @property
     def is_deterministic(self) -> bool:
-        if self.provider == 'HUGGINGFACE_LOCAL':
+        if self.provider == ProveedorLlm.HUGGINGFACE_LOCAL:
             return not self.endpoint
-        return self.provider not in ('GEMINI', 'OPENAI') or not self._api_key
+        return self.provider not in (ProveedorLlm.GEMINI, ProveedorLlm.OPENAI) or not self._api_key
 
     @property
     def provider_label(self) -> str:
@@ -44,7 +45,7 @@ class LLMClient:
         """Devuelve una instancia validada de `schema`; en modo determinista ejecuta `fallback`."""
         if self.is_deterministic:
             return fallback()
-        if self.provider == 'GEMINI':
+        if self.provider == ProveedorLlm.GEMINI:
             return self._gemini(system, user, schema)
         return self._openai_compatible(system, user, schema)
 
@@ -76,7 +77,7 @@ class LLMClient:
             base_url=self.endpoint or None,
             timeout=settings.LLM_TIMEOUT_SECONDS,
         )
-        if self.provider == 'OPENAI':
+        if self.provider == ProveedorLlm.OPENAI:
             response_format = {
                 'type': 'json_schema',
                 'json_schema': {'name': schema.__name__, 'schema': schema.model_json_schema()},

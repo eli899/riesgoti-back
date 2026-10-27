@@ -4,18 +4,18 @@ from django.db import transaction
 from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.accounts import messages as msg
 from apps.accounts.models import Permiso, Rol, RolPermiso, Usuario
-from apps.accounts.permissions import (
-    ADMIN_ROLE_CODE,
+from apps.accounts.permissions import get_user_permission_codes
+from apps.accounts.rbac import (
+    ADMIN_REQUIRED_PERMISSIONS,
     ADMINISTRATIVE_PERMISSIONS,
     SOD_RISK_PERMISSIONS,
-    get_user_permission_codes,
+    SYSTEM_ROLE_CODES,
+    RolCodigo,
 )
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
-
-SYSTEM_ROLE_CODES = frozenset({'REPORTANTE', 'ANALISTA', ADMIN_ROLE_CODE})
-# Permisos que el rol ADMIN debe conservar para no perder el gobierno de la plataforma.
-ADMIN_REQUIRED_PERMISSIONS = frozenset({'usuario.administrar', 'rol.administrar'})
 
 
 # ---------------------------------------------------------------------------
@@ -35,9 +35,9 @@ class AuthService:
     def login(cls, request, *, correo: str, password: str) -> dict:
         user = authenticate(request, correo=correo, password=password)
         if user is None:
-            AuditService.log(accion='INICIO_SESION_FALLIDO', detalle=f'correo={correo}')
-            raise AuthenticationFailed('Credenciales inválidas o usuario inactivo.')
-        AuditService.log(actor=user, accion='INICIO_SESION', usuario_objeto=user, detalle=f'correo={user.correo}')
+            AuditService.log(accion=AccionAuditoria.INICIO_SESION_FALLIDO, detalle=f'correo={correo}')
+            raise AuthenticationFailed(msg.CREDENCIALES_INVALIDAS)
+        AuditService.log(actor=user, accion=AccionAuditoria.INICIO_SESION, usuario_objeto=user, detalle=f'correo={user.correo}')
         return cls.build_tokens(user)
 
 
@@ -47,21 +47,21 @@ class AuthService:
 class UserService:
     @staticmethod
     def _assert_admin_continuity(actor: Usuario, instance: Usuario, *, nuevo_rol: Rol, nuevo_activo: bool) -> None:
-        era_admin_activo = instance.activo and instance.rol.codigo == ADMIN_ROLE_CODE
-        sigue_admin_activo = nuevo_activo and nuevo_rol.codigo == ADMIN_ROLE_CODE
+        era_admin_activo = instance.activo and instance.rol.codigo == RolCodigo.ADMIN
+        sigue_admin_activo = nuevo_activo and nuevo_rol.codigo == RolCodigo.ADMIN
         if not era_admin_activo or sigue_admin_activo:
             return
 
         if actor.pk == instance.pk:
-            raise ValidationError({'activo': 'Un administrador no puede retirarse su propio acceso administrativo.'})
+            raise ValidationError({'activo': msg.ADMIN_AUTORRETIRO})
 
         otros_admins = (
             Usuario.objects.select_for_update()
-            .filter(rol__codigo=ADMIN_ROLE_CODE, activo=True)
+            .filter(rol__codigo=RolCodigo.ADMIN, activo=True)
             .exclude(pk=instance.pk)
         )
         if not list(otros_admins):
-            raise ValidationError({'activo': 'No se puede desactivar ni cambiar de rol al último administrador activo.'})
+            raise ValidationError({'activo': msg.ULTIMO_ADMIN})
 
     @staticmethod
     @transaction.atomic
@@ -77,7 +77,7 @@ class UserService:
             user.activo = False
             user.save(update_fields=['activo', 'ultima_modificacion'])
         AuditService.log(
-            actor=actor, accion='CREAR_USUARIO', usuario_objeto=user, rol=user.rol,
+            actor=actor, accion=AccionAuditoria.CREAR_USUARIO, usuario_objeto=user, rol=user.rol,
             detalle=f'correo={user.correo} rol={user.rol.codigo}',
         )
         return user
@@ -102,11 +102,11 @@ class UserService:
 
         instance.save()
         if 'activo' in cambios:
-            accion = 'ACTIVAR_USUARIO' if instance.activo else 'DESACTIVAR_USUARIO'
+            accion = AccionAuditoria.ACTIVAR_USUARIO if instance.activo else AccionAuditoria.DESACTIVAR_USUARIO
         elif 'rol' in cambios:
-            accion = 'CAMBIAR_ROL_USUARIO'
+            accion = AccionAuditoria.CAMBIAR_ROL_USUARIO
         else:
-            accion = 'ACTUALIZAR_USUARIO'
+            accion = AccionAuditoria.ACTUALIZAR_USUARIO
         AuditService.log(
             actor=actor, accion=accion, usuario_objeto=instance, rol=instance.rol,
             detalle=f'campos={",".join(cambios)}',
@@ -121,23 +121,18 @@ class RoleService:
     @staticmethod
     def validate_permission_set(codigo: str, permiso_codigos: set[str], activo: bool) -> None:
         """Valida SoD (INV-05) sobre el conjunto final de permisos de un rol."""
-        if codigo == ADMIN_ROLE_CODE:
+        if codigo == RolCodigo.ADMIN:
             prohibidos = permiso_codigos & SOD_RISK_PERMISSIONS
             if prohibidos:
-                raise ValidationError({
-                    'permisos': f'Segregación de Funciones: el rol ADMIN no puede recibir {sorted(prohibidos)}.'
-                })
+                raise ValidationError({'permisos': msg.SOD_ADMIN_PERMISOS.format(permisos=sorted(prohibidos))})
             faltantes = ADMIN_REQUIRED_PERMISSIONS - permiso_codigos
             if faltantes:
-                raise ValidationError({'permisos': f'El rol ADMIN debe conservar {sorted(faltantes)}.'})
+                raise ValidationError({'permisos': msg.ADMIN_PERMISOS_OBLIGATORIOS.format(permisos=sorted(faltantes))})
             if not activo:
-                raise ValidationError({'activo': 'El rol ADMIN no puede desactivarse.'})
+                raise ValidationError({'activo': msg.ADMIN_NO_DESACTIVABLE})
 
         if (permiso_codigos & SOD_RISK_PERMISSIONS) and (permiso_codigos & ADMINISTRATIVE_PERMISSIONS):
-            raise ValidationError({
-                'permisos': 'Segregación de Funciones: un mismo rol no puede combinar permisos de administración '
-                            'con permisos de evaluación/decisión de riesgos.'
-            })
+            raise ValidationError({'permisos': msg.SOD_COMBINACION})
 
     @staticmethod
     def _sync_permissions(rol: Rol, permiso_codigos: set[str]) -> None:
@@ -156,7 +151,7 @@ class RoleService:
         rol = Rol.objects.create(codigo=data['codigo'], nombre=data['nombre'], activo=data.get('activo', True))
         cls._sync_permissions(rol, permisos)
         AuditService.log(
-            actor=actor, accion='CREAR_ROL', rol=rol,
+            actor=actor, accion=AccionAuditoria.CREAR_ROL, rol=rol,
             detalle=f'codigo={rol.codigo} permisos={",".join(sorted(permisos))}',
         )
         return rol
@@ -165,17 +160,17 @@ class RoleService:
     @transaction.atomic
     def update_role(cls, actor: Usuario, instance: Rol, data: dict) -> Rol:
         if instance.codigo in SYSTEM_ROLE_CODES and data['codigo'] != instance.codigo:
-            raise ValidationError({'codigo': 'El código de un rol base del sistema no puede modificarse.'})
+            raise ValidationError({'codigo': msg.ROL_BASE_CODIGO_INMUTABLE})
         permisos = set(data['permisos'])
         cls.validate_permission_set(data['codigo'], permisos, data['activo'])
         if instance.activo and not data['activo'] and instance.usuarios.filter(activo=True).exists():
-            raise ValidationError({'activo': 'No se puede desactivar un rol con usuarios activos asignados.'})
+            raise ValidationError({'activo': msg.ROL_CON_USUARIOS_ACTIVOS})
 
         instance.codigo, instance.nombre, instance.activo = data['codigo'], data['nombre'], data['activo']
         instance.save()
         cls._sync_permissions(instance, permisos)
         AuditService.log(
-            actor=actor, accion='ACTUALIZAR_ROL', rol=instance,
+            actor=actor, accion=AccionAuditoria.ACTUALIZAR_ROL, rol=instance,
             detalle=f'codigo={instance.codigo} activo={instance.activo} permisos={",".join(sorted(permisos))}',
         )
         return instance

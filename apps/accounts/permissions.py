@@ -1,24 +1,7 @@
 from rest_framework.permissions import BasePermission
 
 from apps.accounts.models import RolPermiso
-
-ADMIN_ROLE_CODE = 'ADMIN'
-
-# Segregación de Funciones (INV-05, ISO/IEC 27001 A.5.3): permisos de evaluación/decisión de riesgos.
-SOD_RISK_PERMISSIONS = frozenset({
-    'riesgo.revisar_agrupacion',
-    'riesgo.evaluar',
-    'riesgo.validar',
-})
-
-# Permisos de administración que no pueden convivir con SOD_RISK_PERMISSIONS en un mismo rol.
-ADMINISTRATIVE_PERMISSIONS = frozenset({
-    'usuario.administrar',
-    'rol.administrar',
-    'matriz.administrar',
-    'documento.administrar',
-    'activo.administrar',
-})
+from apps.accounts.rbac import SOD_RISK_PERMISSIONS, RolCodigo
 
 
 def get_user_permission_codes(user) -> set[str]:
@@ -38,7 +21,7 @@ def get_user_permission_codes(user) -> set[str]:
 
 
 def user_has_permission(user, code: str) -> bool:
-    if code in SOD_RISK_PERMISSIONS and user.rol.codigo == ADMIN_ROLE_CODE:
+    if code in SOD_RISK_PERMISSIONS and user.rol.codigo == RolCodigo.ADMIN:
         return False
     return code in get_user_permission_codes(user)
 
@@ -65,7 +48,7 @@ class HasRiesgoTIPermission(BasePermission):
 
         required_set = {required} if isinstance(required, str) else set(required)
 
-        if user.rol.codigo == ADMIN_ROLE_CODE and (required_set & self.SOD_FORBIDDEN_FOR_ADMIN):
+        if user.rol.codigo == RolCodigo.ADMIN and (required_set & self.SOD_FORBIDDEN_FOR_ADMIN):
             return False
 
         return bool(required_set & get_user_permission_codes(user))

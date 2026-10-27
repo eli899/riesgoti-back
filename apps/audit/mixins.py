@@ -8,7 +8,7 @@ class AuditLogMixin:
     Registra automáticamente un EVENTO_AUDITORIA en cada create/update de un ViewSet DRF.
 
     El ViewSet declara:
-      * audit_actions = {'create': 'CREAR_X', 'update': 'ACTUALIZAR_X'}
+      * audit_actions = {'create': AccionAuditoria.CREAR_ACTIVO, 'update': AccionAuditoria.ACTUALIZAR_ACTIVO}
       * get_audit_targets(instance) -> dict con las FKs de EVENTO_AUDITORIA (activo=, rol=, ...)
       * get_audit_detail(instance, action) -> str (opcional)
     La mutación y su evento se confirman en la misma transacción.

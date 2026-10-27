@@ -9,12 +9,16 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import NotFound
 
+from apps.ai_config import messages as msg
+from apps.ai_config.constants import ProveedorEmbedding, ProveedorLlm
 from apps.ai_config.crypto import EnvelopeCryptoService
 from apps.ai_config.models import ConfiguracionIARAG
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
+from apps.documents_rag.constants import ProcesamientoDocumento
 from apps.documents_rag.models import VersionDocumento
 
-PROVIDER_TIMEOUT_SECONDS = 20
+LLM_PING_TIMEOUT_SECONDS = 20
 PING_TEXT = 'ping'
 # Nombre del modelo sentence-transformers que el servidor carga al arrancar (solo lo define el stack E2E).
 PRELOAD_EMBEDDING_MODEL_ENV = 'RIESGOTI_PRELOAD_EMBEDDING_MODEL'
@@ -27,14 +31,14 @@ class AIConfigService:
     def get_active() -> ConfiguracionIARAG:
         config = ConfiguracionIARAG.objects.filter(activa=True).order_by('-creado_en', '-id').first()
         if config is None:
-            raise NotFound('No existe una configuración IA/RAG activa. Ejecute seed_riesgoti o registre una.')
+            raise NotFound(msg.SIN_CONFIGURACION_ACTIVA)
         return config
 
     @staticmethod
     def find_outdated_versions(modelo_embedding: str) -> list[VersionDocumento]:
         return list(
             VersionDocumento.objects.select_related('documento')
-            .filter(activa=True, procesamiento='AUTORIZADO')
+            .filter(activa=True, procesamiento=ProcesamientoDocumento.AUTORIZADO)
             .exclude(modelo_embedding=modelo_embedding)
             .order_by('documento__codigo', 'version')
         )
@@ -79,7 +83,7 @@ class AIConfigService:
         llaves = [nombre for nombre, valor in (('api_key_llm', data.get('api_key_llm')), ('api_key_embedding', data.get('api_key_embedding'))) if valor and valor.strip()]
         AuditService.log(
             actor=actor,
-            accion='ACTUALIZAR_CONFIG_IA_RAG',
+            accion=AccionAuditoria.ACTUALIZAR_CONFIG_IA_RAG,
             detalle=(
                 f'version={config.version_configuracion} anterior={previous.version_configuracion if previous else "-"} '
                 f'llm={config.proveedor_llm}/{config.modelo_llm} embedding={config.proveedor_embedding}/{config.modelo_embedding} '
@@ -158,7 +162,7 @@ class AIConnectionTester:
 
         AuditService.log(
             actor=actor,
-            accion='PROBAR_CONEXION_IA',
+            accion=AccionAuditoria.PROBAR_CONEXION_IA,
             detalle=f'llm={llm_provider}/{llm_model}:{llm.status} embedding={emb_provider}/{emb_model}:{embedding.status}',
         )
         return {
@@ -204,33 +208,33 @@ class AIConnectionTester:
 
     @classmethod
     def _ping_llm(cls, provider: str, model: str, endpoint: str | None, key: str | None) -> None:
-        if provider == 'GEMINI':
+        if provider == ProveedorLlm.GEMINI:
             from google import genai
 
             client = genai.Client(api_key=cls._require_key(key, provider))
             client.models.generate_content(model=model, contents=PING_TEXT)
-        elif provider in ('OPENAI', 'HUGGINGFACE_LOCAL'):
+        elif provider in (ProveedorLlm.OPENAI, ProveedorLlm.HUGGINGFACE_LOCAL):
             from openai import OpenAI
 
-            if provider == 'HUGGINGFACE_LOCAL' and not endpoint:
+            if provider == ProveedorLlm.HUGGINGFACE_LOCAL and not endpoint:
                 raise ValueError('HUGGINGFACE_LOCAL requiere endpoint_base_llm (servidor compatible con la API de OpenAI).')
-            api_key = cls._require_key(key, provider) if provider == 'OPENAI' else (key or 'no-key')
-            client = OpenAI(api_key=api_key, base_url=endpoint or None, timeout=PROVIDER_TIMEOUT_SECONDS)
+            api_key = cls._require_key(key, provider) if provider == ProveedorLlm.OPENAI else (key or 'no-key')
+            client = OpenAI(api_key=api_key, base_url=endpoint or None, timeout=LLM_PING_TIMEOUT_SECONDS)
             client.chat.completions.create(model=model, messages=[{'role': 'user', 'content': PING_TEXT}], max_tokens=1)
         else:
             raise ValueError(f'Proveedor LLM no soportado: {provider}.')
 
     @classmethod
     def _ping_embedding(cls, provider: str, model: str, key: str | None) -> int:
-        if provider == 'SENTENCE_TRANSFORMERS':
+        if provider == ProveedorEmbedding.SENTENCE_TRANSFORMERS:
             vector = _load_sentence_transformer(model).encode(PING_TEXT, normalize_embeddings=True)
             return int(len(vector))
-        if provider == 'OPENAI':
+        if provider == ProveedorEmbedding.OPENAI:
             from openai import OpenAI
 
-            client = OpenAI(api_key=cls._require_key(key, provider), timeout=PROVIDER_TIMEOUT_SECONDS)
+            client = OpenAI(api_key=cls._require_key(key, provider), timeout=LLM_PING_TIMEOUT_SECONDS)
             return len(client.embeddings.create(model=model, input=PING_TEXT).data[0].embedding)
-        if provider == 'GEMINI':
+        if provider == ProveedorEmbedding.GEMINI:
             from google import genai
 
             client = genai.Client(api_key=cls._require_key(key, provider))

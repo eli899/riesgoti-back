@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import HasRiesgoTIPermission, user_has_permission
+from apps.accounts.rbac import CodigoPermiso
 from apps.assets_matrix.models import Activo, TipoActivo
 from apps.assets_matrix.serializers import (
     ActivoInputSerializer,
@@ -13,19 +14,21 @@ from apps.assets_matrix.serializers import (
     TipoActivoOutputSerializer,
 )
 from apps.assets_matrix.services import MatrixService
+from apps.audit.constants import AccionAuditoria
 from apps.audit.mixins import AuditLogMixin
+from config.constants import OpenApiTag
 
-ASSET_ADMIN_PERMISSION = 'activo.administrar'
+ASSET_ADMIN_PERMISSION = CodigoPermiso.ACTIVO_ADMINISTRAR
 
 
 # ---------------------------------------------------------------------------
 # Catálogo de activos
 # ---------------------------------------------------------------------------
 @extend_schema_view(
-    list=extend_schema(tags=['Catálogo de Activos'], responses=ActivoOutputSerializer(many=True)),
-    retrieve=extend_schema(tags=['Catálogo de Activos'], responses=ActivoOutputSerializer),
-    create=extend_schema(tags=['Catálogo de Activos'], request=ActivoInputSerializer, responses={201: ActivoOutputSerializer}),
-    partial_update=extend_schema(tags=['Catálogo de Activos'], request=ActivoInputSerializer, responses=ActivoOutputSerializer),
+    list=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], responses=ActivoOutputSerializer(many=True)),
+    retrieve=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], responses=ActivoOutputSerializer),
+    create=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], request=ActivoInputSerializer, responses={201: ActivoOutputSerializer}),
+    partial_update=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], request=ActivoInputSerializer, responses=ActivoOutputSerializer),
 )
 class ActivoViewSet(
     AuditLogMixin,
@@ -46,7 +49,7 @@ class ActivoViewSet(
     search_fields = ['codigo', 'nombre', 'descripcion']
     ordering_fields = ['codigo', 'nombre', 'criticidad', 'creado_en']
     ordering = ['codigo']
-    audit_actions = {'create': 'CREAR_ACTIVO', 'update': 'ACTUALIZAR_ACTIVO'}
+    audit_actions = {'create': AccionAuditoria.CREAR_ACTIVO, 'update': AccionAuditoria.ACTUALIZAR_ACTIVO}
 
     def get_queryset(self):
         qs = Activo.objects.select_related('tipo').all()
@@ -63,7 +66,7 @@ class ActivoViewSet(
     def resolve_audit_action(self, instance, action: str) -> str | None:
         previo = getattr(self, '_activo_previo', None)
         if action == 'update' and previo is not None and previo != instance.activo:
-            return 'ACTIVAR_ACTIVO' if instance.activo else 'DESACTIVAR_ACTIVO'
+            return AccionAuditoria.ACTIVAR_ACTIVO if instance.activo else AccionAuditoria.DESACTIVAR_ACTIVO
         return super().resolve_audit_action(instance, action)
 
     def create(self, request):
@@ -81,7 +84,7 @@ class ActivoViewSet(
         return Response(ActivoOutputSerializer(dto.instance).data)
 
 
-@extend_schema_view(list=extend_schema(tags=['Catálogo de Activos'], summary='Tipos de activo vigentes'))
+@extend_schema_view(list=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], summary='Tipos de activo vigentes'))
 class TipoActivoViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     serializer_class = TipoActivoOutputSerializer
     pagination_class = None
@@ -95,19 +98,19 @@ class TipoActivoViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 # Matriz de riesgo 5x5
 # ---------------------------------------------------------------------------
 class ActiveMatrixView(APIView):
-    @extend_schema(responses={200: MatrizActivaOutputSerializer}, tags=['Matriz de Riesgo'], summary='Matriz 5x5 activa')
+    @extend_schema(responses={200: MatrizActivaOutputSerializer}, tags=[OpenApiTag.MATRIZ_RIESGO], summary='Matriz 5x5 activa')
     def get(self, request):
         return Response(MatrizActivaOutputSerializer(MatrixService.get_active()).data)
 
 
 class PublishMatrixView(APIView):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'matriz.administrar'
+    required_permission = CodigoPermiso.MATRIZ_ADMINISTRAR
 
     @extend_schema(
         request=PublishMatrixInputSerializer,
         responses={201: MatrizActivaOutputSerializer},
-        tags=['Matriz de Riesgo'],
+        tags=[OpenApiTag.MATRIZ_RIESGO],
         summary='Publica una nueva versión inmutable de la matriz 5x5',
     )
     def post(self, request):

@@ -196,6 +196,9 @@ CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TRACK_STARTED = True
+# Límites de las tareas de IA (ramas operativa y estratégica): el suave aborta llamadas colgadas al proveedor.
+CELERY_AI_TASK_SOFT_TIME_LIMIT = int(os.environ.get('CELERY_AI_TASK_SOFT_TIME_LIMIT', 180))
+CELERY_AI_TASK_TIME_LIMIT = int(os.environ.get('CELERY_AI_TASK_TIME_LIMIT', 240))
 
 # ---------------------------------------------------------------------------
 # Almacenamiento local persistente

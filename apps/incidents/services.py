@@ -18,28 +18,16 @@ from django.utils.text import get_valid_filename
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from apps.ai_config.models import ConfiguracionIARAG
+from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
+from apps.incidents import messages as msg
+from apps.incidents.constants import ATENCION_TEXTO_MIN_LENGTH, EstadoIncidencia, ResultadoOrientacion
 from apps.incidents.models import AtencionIncidencia, EvidenciaIncidencia, HistorialEstadoIncidencia, Incidencia
+from apps.risks.constants import EstadoTareaIA, RamaTareaIA, TipoOrientacion
 from apps.risks.models import OrientacionOperativa, RespuestaOrientacion, TareaIA
+from config.constants import IO_BLOCK_BYTES
 
 logger = logging.getLogger(__name__)
-
-REGISTRADA = 'REGISTRADA'
-EN_ANALISIS = 'EN_ANALISIS'
-PENDIENTE_ATENCION_HUMANA = 'PENDIENTE_ATENCION_HUMANA'
-EN_ATENCION = 'EN_ATENCION'
-CERRADA = 'CERRADA'
-ESTADOS_INCIDENCIA = [REGISTRADA, EN_ANALISIS, PENDIENTE_ATENCION_HUMANA, EN_ATENCION, CERRADA]
-
-RAMA_OPERATIVA = 'OPERATIVA'
-RAMA_ESTRATEGICA = 'ESTRATEGICA'
-TAREA_PENDIENTE = 'PENDIENTE'
-
-FUNCIONO = 'FUNCIONO'
-NO_FUNCIONO = 'NO_FUNCIONO'
-ORIENTACION_SUGERENCIA = 'SUGERENCIA'
-
-COPY_BLOCK_BYTES = 64 * 1024
 
 
 def current_status_subquery():
@@ -63,7 +51,7 @@ class IncidentService:
         if annotated:
             return annotated
         last_entry = incidencia.historial_estados.order_by('-ocurrido_en', '-id').first()
-        return last_entry.estado if last_entry else REGISTRADA
+        return last_entry.estado if last_entry else EstadoIncidencia.REGISTRADA
 
     @staticmethod
     def _lock_with_status(incidencia_id: int) -> tuple[Incidencia, str]:
@@ -97,7 +85,7 @@ class IncidentService:
         hasher, size = hashlib.sha256(), 0
         fd, tmp_name = tempfile.mkstemp(dir=root, prefix='.upload_')
         with os.fdopen(fd, 'wb') as handle:
-            for block in uploaded.chunks(COPY_BLOCK_BYTES):
+            for block in uploaded.chunks(IO_BLOCK_BYTES):
                 hasher.update(block)
                 size += len(block)
                 handle.write(block)
@@ -108,13 +96,13 @@ class IncidentService:
 
     @staticmethod
     def _new_task(incidencia: Incidencia, rama: str, cfg, reportante) -> TareaIA:
-        sufijo = 'op' if rama == RAMA_OPERATIVA else 'est'
+        sufijo = 'op' if rama == RamaTareaIA.OPERATIVA else 'est'
         return TareaIA.objects.create(
             incidencia=incidencia,
             rama=rama,
             intento=1,
             clave_idempotencia=f'inc-{incidencia.id}-{sufijo}-v1',
-            estado=TAREA_PENDIENTE,
+            estado=EstadoTareaIA.PENDIENTE,
             proveedor=cfg.proveedor_llm if cfg else None,
             modelo=cfg.modelo_llm if cfg else None,
             version_configuracion=cfg.version_configuracion if cfg else None,
@@ -164,15 +152,15 @@ class IncidentService:
                         sha256=item['sha256'],
                     )
 
-                cls.transition(incidencia, REGISTRADA, reportante, 'Registro inicial de incidencia por el reportante.')
-                cls.transition(incidencia, EN_ANALISIS, reportante,
+                cls.transition(incidencia, EstadoIncidencia.REGISTRADA, reportante, 'Registro inicial de incidencia por el reportante.')
+                cls.transition(incidencia, EstadoIncidencia.EN_ANALISIS, reportante,
                                'Incidencia en análisis automático (ramas Operativa y Estratégica).')
 
-                tarea_op = cls._new_task(incidencia, RAMA_OPERATIVA, cfg, reportante)
-                tarea_est = cls._new_task(incidencia, RAMA_ESTRATEGICA, cfg, reportante)
+                tarea_op = cls._new_task(incidencia, RamaTareaIA.OPERATIVA, cfg, reportante)
+                tarea_est = cls._new_task(incidencia, RamaTareaIA.ESTRATEGICA, cfg, reportante)
 
                 AuditService.log(
-                    actor=reportante, incidencia=incidencia, activo=activo_reportado, accion='REGISTRAR_INCIDENCIA',
+                    actor=reportante, incidencia=incidencia, activo=activo_reportado, accion=AccionAuditoria.REGISTRAR_INCIDENCIA,
                     detalle=f'Incidencia #{incidencia.id} registrada con {len(staged)} evidencia(s).',
                 )
                 op_id, est_id = tarea_op.id, tarea_est.id
@@ -193,27 +181,27 @@ class IncidentService:
     def register_orientation_feedback(cls, *, incidencia: Incidencia, actor, resultado: str) -> RespuestaOrientacion:
         incidencia, estado = cls._lock_with_status(incidencia.pk)
         if incidencia.reportante_id != actor.id:
-            raise PermissionDenied('Solo el reportante de la incidencia puede confirmar la orientación.')
-        if estado != EN_ANALISIS:
-            raise ValidationError({'estado': f'La incidencia está en {estado}; ya no admite confirmación de la orientación.'})
+            raise PermissionDenied(msg.SOLO_REPORTANTE_CONFIRMA)
+        if estado != EstadoIncidencia.EN_ANALISIS:
+            raise ValidationError({'estado': msg.CONFIRMACION_FUERA_DE_ESTADO.format(estado=estado)})
 
-        tarea = latest_task(incidencia, RAMA_OPERATIVA)
+        tarea = latest_task(incidencia, RamaTareaIA.OPERATIVA)
         orientacion = OrientacionOperativa.objects.filter(tarea=tarea).first() if tarea else None
-        if orientacion is None or orientacion.tipo != ORIENTACION_SUGERENCIA:
-            raise ValidationError({'orientacion': 'No existe una sugerencia operativa que confirmar.'})
+        if orientacion is None or orientacion.tipo != TipoOrientacion.SUGERENCIA:
+            raise ValidationError({'orientacion': msg.SIN_SUGERENCIA})
         if RespuestaOrientacion.objects.filter(orientacion=orientacion).exists():
-            raise ValidationError({'resultado': 'La orientación ya fue confirmada por el reportante.'})
+            raise ValidationError({'resultado': msg.ORIENTACION_YA_CONFIRMADA})
 
         respuesta = RespuestaOrientacion.objects.create(orientacion=orientacion, resultado=resultado)
-        if resultado == FUNCIONO:
+        if resultado == ResultadoOrientacion.FUNCIONO:
             # INV-02: el cierre operativo no toca ni detiene TAREA_IA(rama='ESTRATEGICA').
-            cls.transition(incidencia, CERRADA, actor,
+            cls.transition(incidencia, EstadoIncidencia.CERRADA, actor,
                            'Resuelta mediante orientación operativa automática (confirmado por reportante).')
         else:
-            cls.transition(incidencia, PENDIENTE_ATENCION_HUMANA, actor,
+            cls.transition(incidencia, EstadoIncidencia.PENDIENTE_ATENCION_HUMANA, actor,
                            'La orientación operativa no resolvió el incidente; escalado a Analista N2.')
         AuditService.log(
-            actor=actor, incidencia=incidencia, accion='CONFIRMAR_ORIENTACION_OPERATIVA',
+            actor=actor, incidencia=incidencia, accion=AccionAuditoria.CONFIRMAR_ORIENTACION_OPERATIVA,
             detalle=f'resultado={resultado} tarea_operativa={tarea.id}',
         )
         return respuesta
@@ -227,12 +215,12 @@ class IncidentService:
         incidencia, estado = cls._lock_with_status(incidencia.pk)
         atencion = AtencionIncidencia.objects.filter(incidencia=incidencia).first()
 
-        if estado == EN_ATENCION and atencion and atencion.cerrada_en is None:
+        if estado == EstadoIncidencia.EN_ATENCION and atencion and atencion.cerrada_en is None:
             if atencion.analista_id != analista.id:
-                raise ValidationError({'estado': f'La incidencia ya está siendo atendida por {atencion.analista.nombre_completo}.'})
+                raise ValidationError({'estado': msg.YA_EN_ATENCION.format(analista=atencion.analista.nombre_completo)})
             return atencion  # Idempotente para el mismo analista.
-        if estado not in (EN_ANALISIS, PENDIENTE_ATENCION_HUMANA):
-            raise ValidationError({'estado': f'No se puede iniciar la atención de una incidencia en estado {estado}.'})
+        if estado not in (EstadoIncidencia.EN_ANALISIS, EstadoIncidencia.PENDIENTE_ATENCION_HUMANA):
+            raise ValidationError({'estado': msg.ATENCION_FUERA_DE_ESTADO.format(estado=estado)})
 
         if atencion is None:
             atencion = AtencionIncidencia.objects.create(incidencia=incidencia, analista=analista)
@@ -240,8 +228,8 @@ class IncidentService:
             atencion.analista, atencion.cerrada_en = analista, None
             atencion.save(update_fields=['analista', 'cerrada_en'])
 
-        cls.transition(incidencia, EN_ATENCION, analista, f'Atención humana N2 iniciada por {analista.nombre_completo}.')
-        AuditService.log(actor=analista, incidencia=incidencia, accion='INICIAR_ATENCION_HUMANA', detalle=f'estado_previo={estado}')
+        cls.transition(incidencia, EstadoIncidencia.EN_ATENCION, analista, f'Atención humana N2 iniciada por {analista.nombre_completo}.')
+        AuditService.log(actor=analista, incidencia=incidencia, accion=AccionAuditoria.INICIAR_ATENCION_HUMANA, detalle=f'estado_previo={estado}')
         return atencion
 
     @classmethod
@@ -249,10 +237,10 @@ class IncidentService:
     def update_attention(cls, *, incidencia: Incidencia, analista, data: dict) -> AtencionIncidencia:
         incidencia, estado = cls._lock_with_status(incidencia.pk)
         atencion = AtencionIncidencia.objects.select_for_update().filter(incidencia=incidencia).first()
-        if estado != EN_ATENCION or atencion is None:
-            raise ValidationError({'estado': 'La incidencia no está en atención humana; inicie la atención primero.'})
+        if estado != EstadoIncidencia.EN_ATENCION or atencion is None:
+            raise ValidationError({'estado': msg.SIN_ATENCION_INICIADA})
         if atencion.analista_id != analista.id:
-            raise PermissionDenied('Solo el analista asignado puede registrar la atención de esta incidencia.')
+            raise PermissionDenied(msg.SOLO_ANALISTA_ASIGNADO)
 
         for field in ('acciones', 'nota_resolucion'):
             if field in data:
@@ -260,9 +248,9 @@ class IncidentService:
         cerrar = data.get('cerrar', False)
         if cerrar:
             errores = {
-                field: 'Debe tener al menos 10 caracteres para cerrar la incidencia.'
+                field: msg.CIERRE_TEXTO_CORTO.format(minimo=ATENCION_TEXTO_MIN_LENGTH)
                 for field in ('acciones', 'nota_resolucion')
-                if len((getattr(atencion, field) or '').strip()) < 10
+                if len((getattr(atencion, field) or '').strip()) < ATENCION_TEXTO_MIN_LENGTH
             }
             if errores:
                 raise ValidationError(errores)
@@ -271,11 +259,11 @@ class IncidentService:
         atencion.save(update_fields=['acciones', 'nota_resolucion', 'cerrada_en'])
 
         if cerrar:
-            cls.transition(incidencia, CERRADA, analista, 'Incidencia cerrada por el Analista N2 tras la atención humana.')
-            AuditService.log(actor=analista, incidencia=incidencia, accion='CERRAR_ATENCION_HUMANA',
+            cls.transition(incidencia, EstadoIncidencia.CERRADA, analista, 'Incidencia cerrada por el Analista N2 tras la atención humana.')
+            AuditService.log(actor=analista, incidencia=incidencia, accion=AccionAuditoria.CERRAR_ATENCION_HUMANA,
                              detalle='Cierre operativo N2 (el riesgo asociado no se valida ni rechaza).')
         else:
-            AuditService.log(actor=analista, incidencia=incidencia, accion='REGISTRAR_AVANCE_ATENCION', detalle='Avance parcial N2.')
+            AuditService.log(actor=analista, incidencia=incidencia, accion=AccionAuditoria.REGISTRAR_AVANCE_ATENCION, detalle='Avance parcial N2.')
         return atencion
 
 
@@ -291,5 +279,5 @@ def dispatch_ai_tasks(*tarea_ids: int) -> None:
         return
     tareas = {t.id: t.rama for t in TareaIA.objects.filter(id__in=tarea_ids)}
     for tarea_id in tarea_ids:
-        task = run_operational_rag_task if tareas.get(tarea_id) == RAMA_OPERATIVA else run_strategic_risk_task
+        task = run_operational_rag_task if tareas.get(tarea_id) == RamaTareaIA.OPERATIVA else run_strategic_risk_task
         task.delay(tarea_id)

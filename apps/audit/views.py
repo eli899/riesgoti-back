@@ -4,8 +4,10 @@ from rest_framework import viewsets
 from rest_framework.pagination import PageNumberPagination
 
 from apps.accounts.permissions import HasRiesgoTIPermission
+from apps.accounts.rbac import CodigoPermiso
 from apps.audit.models import EventoAuditoria
 from apps.audit.serializers import EventoAuditoriaOutputSerializer
+from config.constants import OpenApiTag
 
 
 class AuditEventFilter(django_filters.FilterSet):
@@ -28,13 +30,13 @@ class AuditEventPagination(PageNumberPagination):
 
 
 @extend_schema_view(
-    list=extend_schema(tags=['Auditoría'], summary='Bitácora de eventos de auditoría'),
-    retrieve=extend_schema(tags=['Auditoría'], summary='Detalle de un evento de auditoría'),
+    list=extend_schema(tags=[OpenApiTag.AUDITORIA], summary='Bitácora de eventos de auditoría'),
+    retrieve=extend_schema(tags=[OpenApiTag.AUDITORIA], summary='Detalle de un evento de auditoría'),
 )
 class AuditEventViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = EventoAuditoriaOutputSerializer
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'usuario.administrar'
+    required_permission = CodigoPermiso.USUARIO_ADMINISTRAR
     filterset_class = AuditEventFilter
     search_fields = ['accion', 'detalle']
     ordering_fields = ['ocurrido_en', 'id']

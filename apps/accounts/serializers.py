@@ -3,16 +3,19 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import RegexValidator
 from rest_framework import serializers
 
+from apps.accounts import messages as msg
+from apps.accounts.constants import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
 from apps.accounts.models import Permiso, Rol, Usuario
 from apps.accounts.permissions import get_user_permission_codes
+from config.constants import column_max_length
 
 
 # ---------------------------------------------------------------------------
 # Autenticación
 # ---------------------------------------------------------------------------
 class LoginInputSerializer(serializers.Serializer):
-    correo = serializers.EmailField(max_length=150)
-    password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=128)
+    correo = serializers.EmailField(max_length=column_max_length(Usuario, 'correo'))
+    password = serializers.CharField(write_only=True, trim_whitespace=False, max_length=PASSWORD_MAX_LENGTH)
 
     def validate_correo(self, value: str) -> str:
         return Usuario.objects.normalize_email(value.strip())
@@ -45,11 +48,11 @@ class LoginOutputSerializer(serializers.Serializer):
 class UsuarioInputSerializer(serializers.Serializer):
     """DTO de entrada para alta (POST) y edición parcial (PATCH) de USUARIO."""
 
-    nombres = serializers.CharField(max_length=100)
-    apellidos = serializers.CharField(max_length=100)
-    correo = serializers.EmailField(max_length=150)
+    nombres = serializers.CharField(max_length=column_max_length(Usuario, 'nombres'))
+    apellidos = serializers.CharField(max_length=column_max_length(Usuario, 'apellidos'))
+    correo = serializers.EmailField(max_length=column_max_length(Usuario, 'correo'))
     rol_id = serializers.PrimaryKeyRelatedField(source='rol', queryset=Rol.objects.filter(activo=True))
-    password = serializers.CharField(write_only=True, required=False, trim_whitespace=False, min_length=8, max_length=128)
+    password = serializers.CharField(write_only=True, required=False, trim_whitespace=False, min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
     activo = serializers.BooleanField(required=False)
 
     def validate_correo(self, value: str) -> str:
@@ -58,13 +61,13 @@ class UsuarioInputSerializer(serializers.Serializer):
         if self.instance is not None:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('Ya existe un usuario con este correo.')
+            raise serializers.ValidationError(msg.CORREO_DUPLICADO)
         return correo
 
     def validate(self, attrs):
         password = attrs.get('password')
         if self.instance is None and not password:
-            raise serializers.ValidationError({'password': 'La contraseña es obligatoria al crear un usuario.'})
+            raise serializers.ValidationError({'password': msg.PASSWORD_OBLIGATORIA})
         if password:
             candidate = self.instance or Usuario(
                 correo=attrs.get('correo', ''), nombres=attrs.get('nombres', ''), apellidos=attrs.get('apellidos', ''),
@@ -106,19 +109,19 @@ class RolInputSerializer(serializers.Serializer):
     """DTO de entrada para POST/PUT de ROL. La validación SoD final se ejecuta en RoleService."""
 
     codigo = serializers.CharField(
-        max_length=50,
-        validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$', 'Use MAYÚSCULAS, dígitos y guion bajo (ej. AUDITOR_TI).')],
+        max_length=column_max_length(Rol, 'codigo'),
+        validators=[RegexValidator(r'^[A-Z][A-Z0-9_]*$', msg.ROL_CODIGO_FORMATO)],
     )
-    nombre = serializers.CharField(max_length=100)
+    nombre = serializers.CharField(max_length=column_max_length(Rol, 'nombre'))
     activo = serializers.BooleanField(default=True)
-    permisos = serializers.ListField(child=serializers.CharField(max_length=50), allow_empty=True)
+    permisos = serializers.ListField(child=serializers.CharField(max_length=column_max_length(Permiso, 'codigo')), allow_empty=True)
 
     def validate_codigo(self, value: str) -> str:
         qs = Rol.objects.filter(codigo=value)
         if self.instance is not None:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
-            raise serializers.ValidationError('Ya existe un rol con este código.')
+            raise serializers.ValidationError(msg.ROL_CODIGO_DUPLICADO)
         return value
 
     def validate_permisos(self, value: list[str]) -> list[str]:
@@ -126,7 +129,7 @@ class RolInputSerializer(serializers.Serializer):
         existentes = set(Permiso.objects.filter(codigo__in=codigos, activo=True).values_list('codigo', flat=True))
         desconocidos = codigos - existentes
         if desconocidos:
-            raise serializers.ValidationError(f'Permisos inexistentes o inactivos: {sorted(desconocidos)}.')
+            raise serializers.ValidationError(msg.PERMISOS_DESCONOCIDOS.format(permisos=sorted(desconocidos)))
         return sorted(codigos)
 
 

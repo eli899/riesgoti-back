@@ -9,6 +9,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from apps.accounts.models import Permiso, Rol, RolPermiso, Usuario
 from apps.accounts.permissions import HasRiesgoTIPermission
+from apps.accounts.rbac import CodigoPermiso
 from apps.accounts.serializers import (
     LoginInputSerializer,
     LoginOutputSerializer,
@@ -20,6 +21,7 @@ from apps.accounts.serializers import (
     UsuarioSesionOutputSerializer,
 )
 from apps.accounts.services import AuthService, RoleService, UserService
+from config.constants import OpenApiTag
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +40,7 @@ class LoginView(APIView):
     @extend_schema(
         request=LoginInputSerializer,
         responses={200: LoginOutputSerializer},
-        tags=['Autenticación'],
+        tags=[OpenApiTag.AUTENTICACION],
         summary='Inicio de sesión con correo y contraseña (JWT)',
     )
     def post(self, request):
@@ -48,7 +50,7 @@ class LoginView(APIView):
         return Response(LoginOutputSerializer(session).data, status=status.HTTP_200_OK)
 
 
-@extend_schema(tags=['Autenticación'], summary='Renovación del token de acceso')
+@extend_schema(tags=[OpenApiTag.AUTENTICACION], summary='Renovación del token de acceso')
 class RefreshView(TokenRefreshView):
     pass
 
@@ -58,7 +60,7 @@ class MeView(APIView):
 
     @extend_schema(
         responses={200: UsuarioSesionOutputSerializer},
-        tags=['Autenticación'],
+        tags=[OpenApiTag.AUTENTICACION],
         summary='Perfil y permisos efectivos del usuario en sesión',
     )
     def get(self, request):
@@ -69,10 +71,10 @@ class MeView(APIView):
 # Administración de usuarios
 # ---------------------------------------------------------------------------
 @extend_schema_view(
-    list=extend_schema(tags=['Administración: Usuarios'], responses=UsuarioOutputSerializer(many=True)),
-    retrieve=extend_schema(tags=['Administración: Usuarios'], responses=UsuarioOutputSerializer),
-    create=extend_schema(tags=['Administración: Usuarios'], request=UsuarioInputSerializer, responses={201: UsuarioOutputSerializer}),
-    partial_update=extend_schema(tags=['Administración: Usuarios'], request=UsuarioInputSerializer, responses=UsuarioOutputSerializer),
+    list=extend_schema(tags=[OpenApiTag.USUARIOS], responses=UsuarioOutputSerializer(many=True)),
+    retrieve=extend_schema(tags=[OpenApiTag.USUARIOS], responses=UsuarioOutputSerializer),
+    create=extend_schema(tags=[OpenApiTag.USUARIOS], request=UsuarioInputSerializer, responses={201: UsuarioOutputSerializer}),
+    partial_update=extend_schema(tags=[OpenApiTag.USUARIOS], request=UsuarioInputSerializer, responses=UsuarioOutputSerializer),
 )
 class UserViewSet(
     mixins.ListModelMixin,
@@ -81,7 +83,7 @@ class UserViewSet(
 ):
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'usuario.administrar'
+    required_permission = CodigoPermiso.USUARIO_ADMINISTRAR
     serializer_class = UsuarioOutputSerializer
     filterset_fields = ['activo', 'rol_id']
     search_fields = ['nombres', 'apellidos', 'correo']
@@ -109,10 +111,10 @@ class UserViewSet(
 # Administración de roles y catálogo de permisos
 # ---------------------------------------------------------------------------
 @extend_schema_view(
-    list=extend_schema(tags=['Administración: Roles'], responses=RolOutputSerializer(many=True)),
-    retrieve=extend_schema(tags=['Administración: Roles'], responses=RolOutputSerializer),
-    create=extend_schema(tags=['Administración: Roles'], request=RolInputSerializer, responses={201: RolOutputSerializer}),
-    update=extend_schema(tags=['Administración: Roles'], request=RolInputSerializer, responses=RolOutputSerializer),
+    list=extend_schema(tags=[OpenApiTag.ROLES], responses=RolOutputSerializer(many=True)),
+    retrieve=extend_schema(tags=[OpenApiTag.ROLES], responses=RolOutputSerializer),
+    create=extend_schema(tags=[OpenApiTag.ROLES], request=RolInputSerializer, responses={201: RolOutputSerializer}),
+    update=extend_schema(tags=[OpenApiTag.ROLES], request=RolInputSerializer, responses=RolOutputSerializer),
 )
 class RoleViewSet(
     mixins.ListModelMixin,
@@ -121,7 +123,7 @@ class RoleViewSet(
 ):
     http_method_names = ['get', 'post', 'put', 'head', 'options']
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'rol.administrar'
+    required_permission = CodigoPermiso.ROL_ADMINISTRAR
     serializer_class = RolOutputSerializer
     ordering = ['id']
 
@@ -148,12 +150,12 @@ class RoleViewSet(
 
 
 @extend_schema_view(
-    list=extend_schema(tags=['Administración: Roles'], summary='Catálogo de permisos'),
-    retrieve=extend_schema(tags=['Administración: Roles']),
+    list=extend_schema(tags=[OpenApiTag.ROLES], summary='Catálogo de permisos'),
+    retrieve=extend_schema(tags=[OpenApiTag.ROLES]),
 )
 class PermissionViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'rol.administrar'
+    required_permission = CodigoPermiso.ROL_ADMINISTRAR
     serializer_class = PermisoOutputSerializer
     pagination_class = None
     ordering = ['codigo']

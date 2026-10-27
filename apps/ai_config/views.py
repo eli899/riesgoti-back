@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import HasRiesgoTIPermission
+from apps.accounts.rbac import CodigoPermiso
 from apps.ai_config.serializers import (
     AIConfigInputSerializer,
     AIConfigOutputSerializer,
@@ -10,6 +11,7 @@ from apps.ai_config.serializers import (
     TestConnectionOutputSerializer,
 )
 from apps.ai_config.services import AIConfigService, AIConnectionTester
+from config.constants import OpenApiTag
 
 
 def _render_config(config) -> dict:
@@ -19,16 +21,16 @@ def _render_config(config) -> dict:
 
 class AIConfigView(APIView):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'documento.administrar'
+    required_permission = CodigoPermiso.DOCUMENTO_ADMINISTRAR
 
-    @extend_schema(responses={200: AIConfigOutputSerializer}, tags=['Administración: IA/RAG'], summary='Configuración IA/RAG activa')
+    @extend_schema(responses={200: AIConfigOutputSerializer}, tags=[OpenApiTag.IA_RAG], summary='Configuración IA/RAG activa')
     def get(self, request):
         return Response(_render_config(AIConfigService.get_active()))
 
     @extend_schema(
         request=AIConfigInputSerializer,
         responses={200: AIConfigOutputSerializer},
-        tags=['Administración: IA/RAG'],
+        tags=[OpenApiTag.IA_RAG],
         summary='Publica una nueva versión de la configuración IA/RAG',
     )
     def put(self, request):
@@ -40,12 +42,12 @@ class AIConfigView(APIView):
 
 class AIConfigTestConnectionView(APIView):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'documento.administrar'
+    required_permission = CodigoPermiso.DOCUMENTO_ADMINISTRAR
 
     @extend_schema(
         request=TestConnectionInputSerializer,
         responses={200: TestConnectionOutputSerializer},
-        tags=['Administración: IA/RAG'],
+        tags=[OpenApiTag.IA_RAG],
         summary='Prueba de conectividad y latencia con los proveedores LLM y de embeddings',
     )
     def post(self, request):

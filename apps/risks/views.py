@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.permissions import HasRiesgoTIPermission
+from apps.accounts.rbac import CodigoPermiso
+from apps.risks.constants import BANDEJAS_RIESGO, BandejaRiesgo, EstadoVersionRiesgo
 from apps.risks.models import VersionRiesgo
 from apps.risks.serializers import (
     ConfirmGroupingInputSerializer,
@@ -19,28 +21,21 @@ from apps.risks.serializers import (
     RiskVersionListDetailOutputSerializer,
 )
 from apps.risks.services import (
-    ESTADO_PENDIENTE,
     RiskDashboardAggregationService,
     RiskGovernanceDecisionService,
     risk_version_queryset,
 )
+from config.constants import OpenApiTag
 
-TAG = 'Gobierno de Riesgos'
 # Solo riesgo.consultar: HasRiesgoTIPermission niega al ADMIN cualquier conjunto que incluya un permiso SoD.
-READ_PERMISSIONS = 'riesgo.consultar'
-BANDEJAS = [
-    ('nuevas', 'Pendientes sin agrupación confirmada'),
-    ('pendientes_revision', 'Pendientes con agrupación confirmada'),
-    ('rechazadas', 'Versiones rechazadas'),
-    ('decididas', 'Versiones con decisión registrada'),
-]
+READ_PERMISSIONS = CodigoPermiso.RIESGO_CONSULTAR
 
 
 class RiskVersionFilter(django_filters.FilterSet):
     estado = django_filters.BaseInFilter(field_name='estado', lookup_expr='in')
     riesgo_id = django_filters.NumberFilter(field_name='riesgo_id')
     origen = django_filters.CharFilter(field_name='origen', lookup_expr='iexact')
-    bandeja = django_filters.ChoiceFilter(choices=BANDEJAS, method='filter_bandeja')
+    bandeja = django_filters.ChoiceFilter(choices=BANDEJAS_RIESGO, method='filter_bandeja')
     q = django_filters.CharFilter(method='filter_q', label='Código RSG, título o amenaza')
 
     class Meta:
@@ -48,21 +43,21 @@ class RiskVersionFilter(django_filters.FilterSet):
         fields = ['estado', 'riesgo_id', 'origen']
 
     def filter_bandeja(self, queryset, name, value):
-        if value == 'nuevas':
-            return queryset.filter(estado=ESTADO_PENDIENTE, agrupacion_confirmada_por__isnull=True)
-        if value == 'pendientes_revision':
-            return queryset.filter(estado=ESTADO_PENDIENTE, agrupacion_confirmada_por__isnull=False)
-        if value == 'rechazadas':
-            return queryset.filter(estado='RECHAZADA')
-        return queryset.exclude(estado=ESTADO_PENDIENTE)
+        if value == BandejaRiesgo.NUEVAS:
+            return queryset.filter(estado=EstadoVersionRiesgo.PENDIENTE, agrupacion_confirmada_por__isnull=True)
+        if value == BandejaRiesgo.PENDIENTES_REVISION:
+            return queryset.filter(estado=EstadoVersionRiesgo.PENDIENTE, agrupacion_confirmada_por__isnull=False)
+        if value == BandejaRiesgo.RECHAZADAS:
+            return queryset.filter(estado=EstadoVersionRiesgo.RECHAZADA)
+        return queryset.exclude(estado=EstadoVersionRiesgo.PENDIENTE)
 
     def filter_q(self, queryset, name, value):
         return queryset.filter(Q(riesgo__codigo__icontains=value) | Q(titulo__icontains=value) | Q(amenaza__icontains=value))
 
 
 @extend_schema_view(
-    list=extend_schema(tags=[TAG], summary='Versiones de riesgo (bandejas de propuestas, historial y comparador)'),
-    retrieve=extend_schema(tags=[TAG], summary='Detalle de una versión de riesgo'),
+    list=extend_schema(tags=[OpenApiTag.GOBIERNO_RIESGOS], summary='Versiones de riesgo (bandejas de propuestas, historial y comparador)'),
+    retrieve=extend_schema(tags=[OpenApiTag.GOBIERNO_RIESGOS], summary='Detalle de una versión de riesgo'),
 )
 class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """
@@ -74,11 +69,11 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
     permission_map = {
         'list': READ_PERMISSIONS,
         'retrieve': READ_PERMISSIONS,
-        'remove_incident': 'riesgo.revisar_agrupacion',
-        'restore_incident': 'riesgo.revisar_agrupacion',
-        'confirm_grouping': 'riesgo.revisar_agrupacion',
-        'evaluate': 'riesgo.evaluar',
-        'decision': 'riesgo.validar',
+        'remove_incident': CodigoPermiso.RIESGO_REVISAR_AGRUPACION,
+        'restore_incident': CodigoPermiso.RIESGO_REVISAR_AGRUPACION,
+        'confirm_grouping': CodigoPermiso.RIESGO_REVISAR_AGRUPACION,
+        'evaluate': CodigoPermiso.RIESGO_EVALUAR,
+        'decision': CodigoPermiso.RIESGO_VALIDAR,
     }
     serializer_class = RiskVersionListDetailOutputSerializer
     pagination_class = None
@@ -93,7 +88,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return Response(RiskVersionListDetailOutputSerializer(risk_version_queryset().get(pk=version_id)).data, status=status_code)
 
     @extend_schema(
-        tags=[TAG], request=RemoveIncidentFromGroupInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], request=RemoveIncidentFromGroupInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
         parameters=[OpenApiParameter('analisis_id', int, OpenApiParameter.PATH)],
         summary='Retira un falso positivo de la agrupación (la fila se conserva como RETIRADA)',
     )
@@ -107,7 +102,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return self._render(version.id)
 
     @extend_schema(
-        tags=[TAG], request=RestoreIncidentToGroupInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], request=RestoreIncidentToGroupInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
         parameters=[OpenApiParameter('analisis_id', int, OpenApiParameter.PATH)],
         summary='Restaura una incidencia retirada a la agrupación',
     )
@@ -121,7 +116,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return self._render(version.id)
 
     @extend_schema(
-        tags=[TAG], request=ConfirmGroupingInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], request=ConfirmGroupingInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
         summary='Confirma el activo afectado y la agrupación de incidencias',
     )
     @action(detail=True, methods=['post'], url_path='confirm-grouping')
@@ -132,7 +127,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return self._render(version.id)
 
     @extend_schema(
-        tags=[TAG], request=RiskEvaluateInputSerializer, responses={200: EvaluacionRiesgoOutputSerializer},
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], request=RiskEvaluateInputSerializer, responses={200: EvaluacionRiesgoOutputSerializer},
         summary='Evalúa la versión en la matriz 5x5 activa (celda_id histórico inmutable)',
     )
     @action(detail=True, methods=['post'])
@@ -143,7 +138,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         return Response(EvaluacionRiesgoOutputSerializer(evaluacion).data)
 
     @extend_schema(
-        tags=[TAG], request=RiskDecisionInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], request=RiskDecisionInputSerializer, responses={200: RiskVersionListDetailOutputSerializer},
         summary='Emite la decisión ISO/IEC 27005 (VALIDADA, CORREGIDA crea v n+1, RECHAZADA)',
     )
     @action(detail=True, methods=['post'])
@@ -158,9 +153,9 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
 
 class RiskDashboardAPIView(APIView):
     permission_classes = [HasRiesgoTIPermission]
-    required_permission = 'riesgo.consultar'
+    required_permission = CodigoPermiso.RIESGO_CONSULTAR
 
-    @extend_schema(tags=[TAG], responses={200: RiskDashboardOutputSerializer},
+    @extend_schema(tags=[OpenApiTag.GOBIERNO_RIESGOS], responses={200: RiskDashboardOutputSerializer},
                    summary='Indicadores de riesgos vigentes (última versión VALIDADA por RIESGO) e incidencias')
     def get(self, request):
         return Response(RiskDashboardOutputSerializer(RiskDashboardAggregationService.build()).data)

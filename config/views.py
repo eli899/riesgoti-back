@@ -8,6 +8,8 @@ from rest_framework.views import APIView
 
 from .serializers import HealthcheckOutputSerializer
 
+from config.constants import OpenApiTag
+
 SERVICE_NAME = 'riesgoti-backend'
 SERVICE_VERSION = '0.0.0'
 
@@ -20,7 +22,7 @@ class HealthcheckView(APIView):
 
     @extend_schema(
         responses={200: HealthcheckOutputSerializer, 503: HealthcheckOutputSerializer},
-        tags=['Sistema'],
+        tags=[OpenApiTag.SISTEMA],
         summary='Estado del servicio backend',
     )
     def get(self, request):

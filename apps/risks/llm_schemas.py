@@ -3,6 +3,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from apps.risks.constants import TipoOrientacion
+
 NO_DETERMINADO = 'NO_DETERMINADO'
 
 
@@ -12,7 +14,7 @@ class OperationalStepOutput(BaseModel):
 
 
 class OperationalGuidanceLLMOutput(BaseModel):
-    tipo: Literal['SUGERENCIA', 'SENSIBLE'] = Field(
+    tipo: Literal[TipoOrientacion.SUGERENCIA, TipoOrientacion.SENSIBLE] = Field(
         ...,
         description='SENSIBLE si el reporte involucra phishing, malware, credenciales comprometidas o acceso no autorizado; '
                     'SUGERENCIA en caso contrario',

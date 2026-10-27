@@ -4,7 +4,16 @@ from django.conf import settings
 from rest_framework import serializers
 
 from apps.assets_matrix.models import Activo
-from apps.incidents.services import FUNCIONO, NO_FUNCIONO, RAMA_ESTRATEGICA, RAMA_OPERATIVA
+from apps.incidents import messages as msg
+from apps.incidents.constants import (
+    ATENCION_TEXTO_MAX_LENGTH,
+    DESCRIPCION_MIN_LENGTH,
+    TITULO_MIN_LENGTH,
+    ResultadoOrientacion,
+)
+from apps.incidents.models import Incidencia
+from apps.risks.constants import RamaTareaIA
+from config.constants import BYTES_PER_MB, column_max_length
 
 # Extensión -> (MIME servido, firmas binarias aceptadas). El MIME declarado por el cliente se ignora.
 EVIDENCE_TYPES = {
@@ -21,53 +30,51 @@ EVIDENCE_TYPES = {
 # DTOs de entrada
 # ---------------------------------------------------------------------------
 class IncidentCreateInputSerializer(serializers.Serializer):
-    titulo = serializers.CharField(min_length=5, max_length=255)
-    descripcion = serializers.CharField(min_length=20)
+    titulo = serializers.CharField(min_length=TITULO_MIN_LENGTH, max_length=column_max_length(Incidencia, 'titulo'))
+    descripcion = serializers.CharField(min_length=DESCRIPCION_MIN_LENGTH)
     activo_reportado_id = serializers.PrimaryKeyRelatedField(
         source='activo_reportado', queryset=Activo.objects.filter(activo=True), required=False, allow_null=True,
     )
-    activo_texto = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
+    activo_texto = serializers.CharField(max_length=column_max_length(Incidencia, 'activo_texto'), required=False, allow_blank=True, allow_null=True)
     evidencias = serializers.ListField(child=serializers.FileField(), required=False, allow_empty=True)
 
     def validate_evidencias(self, archivos):
         if len(archivos) > settings.MAX_EVIDENCES_PER_INCIDENT:
-            raise serializers.ValidationError(f'Máximo {settings.MAX_EVIDENCES_PER_INCIDENT} evidencias por incidencia.')
+            raise serializers.ValidationError(msg.EVIDENCIAS_MAXIMAS.format(maximo=settings.MAX_EVIDENCES_PER_INCIDENT))
         validados = []
         for archivo in archivos:
             nombre = Path(archivo.name).name
             extension = Path(nombre).suffix.lower()
             if extension not in EVIDENCE_TYPES:
-                raise serializers.ValidationError(f'{nombre}: formato no permitido (png, jpg, pdf, log, txt).')
+                raise serializers.ValidationError(msg.EVIDENCIA_FORMATO.format(nombre=nombre))
             if archivo.size > settings.MAX_EVIDENCE_BYTES:
                 raise serializers.ValidationError(
-                    f'{nombre}: supera el máximo de {settings.MAX_EVIDENCE_BYTES // (1024 * 1024)} MB.'
+                    msg.EVIDENCIA_DEMASIADO_GRANDE.format(nombre=nombre, mb=settings.MAX_EVIDENCE_BYTES // BYTES_PER_MB)
                 )
             tipo_mime, firmas = EVIDENCE_TYPES[extension]
             archivo.seek(0)
             cabecera = archivo.read(1024)
             archivo.seek(0)
             if firmas and not any(cabecera.startswith(firma) for firma in firmas):
-                raise serializers.ValidationError(f'{nombre}: el contenido no corresponde a la extensión {extension}.')
+                raise serializers.ValidationError(msg.EVIDENCIA_FIRMA_INVALIDA.format(nombre=nombre, extension=extension))
             if not firmas and b'\x00' in cabecera:
-                raise serializers.ValidationError(f'{nombre}: un archivo de texto no puede contener datos binarios.')
+                raise serializers.ValidationError(msg.EVIDENCIA_TEXTO_BINARIO.format(nombre=nombre))
             validados.append({'archivo': archivo, 'tipo_mime': tipo_mime})
         return validados
 
     def validate(self, attrs):
         if not attrs.get('activo_reportado') and not (attrs.get('activo_texto') or '').strip():
-            raise serializers.ValidationError({
-                'activo_reportado_id': 'Seleccione un activo del catálogo o describa el activo afectado en activo_texto.'
-            })
+            raise serializers.ValidationError({'activo_reportado_id': msg.ACTIVO_OBLIGATORIO})
         return attrs
 
 
 class OrientationFeedbackInputSerializer(serializers.Serializer):
-    resultado = serializers.ChoiceField(choices=[FUNCIONO, NO_FUNCIONO])
+    resultado = serializers.ChoiceField(choices=[r.value for r in ResultadoOrientacion])
 
 
 class HumanAttentionInputSerializer(serializers.Serializer):
-    acciones = serializers.CharField(required=False, allow_blank=True, max_length=10000)
-    nota_resolucion = serializers.CharField(required=False, allow_blank=True, max_length=10000)
+    acciones = serializers.CharField(required=False, allow_blank=True, max_length=ATENCION_TEXTO_MAX_LENGTH)
+    nota_resolucion = serializers.CharField(required=False, allow_blank=True, max_length=ATENCION_TEXTO_MAX_LENGTH)
     cerrar = serializers.BooleanField(default=False)
 
 
@@ -168,19 +175,19 @@ class IncidentListOutputSerializer(serializers.Serializer):
         return len(obj.evidencias.all())
 
     def get_orientacion_tipo(self, obj) -> str | None:
-        orientacion = _orientation_of(self._tasks(obj).get(RAMA_OPERATIVA))
+        orientacion = _orientation_of(self._tasks(obj).get(RamaTareaIA.OPERATIVA))
         return orientacion.tipo if orientacion else None
 
     def get_orientacion_resultado(self, obj) -> str | None:
-        respuesta = _response_of(_orientation_of(self._tasks(obj).get(RAMA_OPERATIVA)))
+        respuesta = _response_of(_orientation_of(self._tasks(obj).get(RamaTareaIA.OPERATIVA)))
         return respuesta.resultado if respuesta else None
 
     def get_tarea_operativa_estado(self, obj) -> str | None:
-        tarea = self._tasks(obj).get(RAMA_OPERATIVA)
+        tarea = self._tasks(obj).get(RamaTareaIA.OPERATIVA)
         return tarea.estado if tarea else None
 
     def get_tarea_estrategica_estado(self, obj) -> str | None:
-        tarea = self._tasks(obj).get(RAMA_ESTRATEGICA)
+        tarea = self._tasks(obj).get(RamaTareaIA.ESTRATEGICA)
         return tarea.estado if tarea else None
 
     def get_analista_nombre(self, obj) -> str | None:
@@ -207,12 +214,12 @@ class IncidentListDetailOutputSerializer(IncidentListOutputSerializer):
     def get_tareas_ia(self, obj) -> dict:
         tareas = self._tasks(obj)
         return {
-            'operativa': TareaIAResumenOutputSerializer(tareas[RAMA_OPERATIVA]).data if RAMA_OPERATIVA in tareas else None,
-            'estrategica': TareaIAResumenOutputSerializer(tareas[RAMA_ESTRATEGICA]).data if RAMA_ESTRATEGICA in tareas else None,
+            'operativa': TareaIAResumenOutputSerializer(tareas[RamaTareaIA.OPERATIVA]).data if RamaTareaIA.OPERATIVA in tareas else None,
+            'estrategica': TareaIAResumenOutputSerializer(tareas[RamaTareaIA.ESTRATEGICA]).data if RamaTareaIA.ESTRATEGICA in tareas else None,
         }
 
     def get_riesgos_vinculados(self, obj) -> list[dict]:
-        tarea = self._tasks(obj).get(RAMA_ESTRATEGICA)
+        tarea = self._tasks(obj).get(RamaTareaIA.ESTRATEGICA)
         analisis = getattr(tarea, 'analisis_estrategico', None) if tarea else None
         if analisis is None:
             return []
