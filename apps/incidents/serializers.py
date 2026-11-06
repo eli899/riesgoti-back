@@ -68,6 +68,22 @@ class IncidentCreateInputSerializer(serializers.Serializer):
         return attrs
 
 
+class IncidentUpdateInputSerializer(serializers.Serializer):
+    """PATCH parcial del reportante; la coherencia activo/activo_texto se valida en el servicio sobre el estado final."""
+
+    titulo = serializers.CharField(min_length=TITULO_MIN_LENGTH, max_length=column_max_length(Incidencia, 'titulo'), required=False)
+    descripcion = serializers.CharField(min_length=DESCRIPCION_MIN_LENGTH, required=False)
+    activo_reportado_id = serializers.PrimaryKeyRelatedField(
+        source='activo_reportado', queryset=Activo.objects.filter(activo=True), required=False, allow_null=True,
+    )
+    activo_texto = serializers.CharField(max_length=column_max_length(Incidencia, 'activo_texto'), required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError(msg.EDICION_VACIA)
+        return attrs
+
+
 class OrientationFeedbackInputSerializer(serializers.Serializer):
     resultado = serializers.ChoiceField(choices=[r.value for r in ResultadoOrientacion])
 

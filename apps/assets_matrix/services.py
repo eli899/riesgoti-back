@@ -1,12 +1,13 @@
-"""Publicación inmutable de CONFIGURACION_MATRIZ (INV-04: los celda_id históricos jamás se alteran)."""
+"""Publicación inmutable de CONFIGURACION_MATRIZ (INV-04: los celda_id históricos jamás se alteran) y eliminación de activos."""
 from django.db import transaction
 from django.db.models import Prefetch
 from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.assets_matrix import messages as msg
-from apps.assets_matrix.models import CeldaMatriz, ConfiguracionMatriz, CriterioImpacto, CriterioProbabilidad
+from apps.assets_matrix.models import Activo, CeldaMatriz, ConfiguracionMatriz, CriterioImpacto, CriterioProbabilidad
 from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
+from config.exceptions import delete_or_conflict
 
 ESTADO_PUBLICADA = 'PUBLICADA'
 
@@ -72,3 +73,19 @@ class MatrixService:
             detalle=f'version={matriz.version} anterior={anterior.version if anterior else "-"} celdas={len(data["celdas"])}',
         )
         return cls._with_structure(ConfiguracionMatriz.objects.filter(pk=matriz.pk)).get()
+
+
+class AssetService:
+    @staticmethod
+    @transaction.atomic
+    def delete(actor, activo: Activo) -> None:
+        """Eliminación física (CHG-0035): 409 si alguna INCIDENCIA o VERSION_RIESGO lo referencia (FK PROTECT)."""
+        activo = Activo.objects.select_for_update().select_related('tipo').get(pk=activo.pk)
+        AuditService.log(
+            actor=actor, accion=AccionAuditoria.ELIMINAR_ACTIVO,
+            detalle=(
+                f'Activo #{activo.pk} eliminado físicamente: {activo.codigo} {activo.nombre} '
+                f'(tipo={activo.tipo.nombre}, criticidad={activo.criticidad}).'
+            ),
+        )
+        delete_or_conflict(activo, msg.ACTIVO_CON_REFERENCIAS)

@@ -23,6 +23,7 @@ from apps.risks.serializers import (
 from apps.risks.services import (
     RiskDashboardAggregationService,
     RiskGovernanceDecisionService,
+    RiskVersionDeletionService,
     risk_version_queryset,
 )
 from config.constants import OpenApiTag
@@ -58,11 +59,16 @@ class RiskVersionFilter(django_filters.FilterSet):
 @extend_schema_view(
     list=extend_schema(tags=[OpenApiTag.GOBIERNO_RIESGOS], summary='Versiones de riesgo (bandejas de propuestas, historial y comparador)'),
     retrieve=extend_schema(tags=[OpenApiTag.GOBIERNO_RIESGOS], summary='Detalle de una versión de riesgo'),
+    destroy=extend_schema(
+        tags=[OpenApiTag.GOBIERNO_RIESGOS], responses={204: None},
+        summary='Elimina físicamente una propuesta sin evaluación ni decisión (409 en otro caso)',
+    ),
 )
 class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """
     Lectura con riesgo.consultar (ADMIN en modo solo lectura). Las mutaciones exigen permisos de evaluación y
     decisión que HasRiesgoTIPermission niega siempre al rol ADMIN (INV-05, HTTP 403).
+    La eliminación física de propuestas pendientes exige riesgo.eliminar (administrativo, no evalúa ni decide).
     """
 
     permission_classes = [HasRiesgoTIPermission]
@@ -74,6 +80,7 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         'confirm_grouping': CodigoPermiso.RIESGO_REVISAR_AGRUPACION,
         'evaluate': CodigoPermiso.RIESGO_EVALUAR,
         'decision': CodigoPermiso.RIESGO_VALIDAR,
+        'destroy': CodigoPermiso.RIESGO_ELIMINAR,
     }
     serializer_class = RiskVersionListDetailOutputSerializer
     pagination_class = None
@@ -149,6 +156,10 @@ class RiskVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, views
         _, nueva = RiskGovernanceDecisionService.decide(version=version, actor=request.user, data=dto.validated_data)
         # CORREGIDA devuelve la nueva versión del analista para continuar su evaluación y validación.
         return self._render(nueva.id if nueva else version.id, status.HTTP_201_CREATED if nueva else status.HTTP_200_OK)
+
+    def destroy(self, request, pk=None):
+        RiskVersionDeletionService.delete(version=self.get_object(), actor=request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class RiskDashboardAPIView(APIView):

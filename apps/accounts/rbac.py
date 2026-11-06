@@ -20,12 +20,15 @@ class CodigoPermiso(StrEnum):
     INCIDENCIA_VER_PROPIAS = 'incidencia.ver_propias'
     INCIDENCIA_VER_TODAS = 'incidencia.ver_todas'
     INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK = 'incidencia.cerrar_propias_por_feedback'
+    INCIDENCIA_EDITAR_PROPIAS = 'incidencia.editar_propias'
+    INCIDENCIA_ELIMINAR = 'incidencia.eliminar'
     ATENCION_VER_COLA = 'atencion.ver_cola'
     ATENCION_ATENDER = 'atencion.atender'
     RIESGO_REVISAR_AGRUPACION = 'riesgo.revisar_agrupacion'
     RIESGO_EVALUAR = 'riesgo.evaluar'
     RIESGO_VALIDAR = 'riesgo.validar'
     RIESGO_CONSULTAR = 'riesgo.consultar'
+    RIESGO_ELIMINAR = 'riesgo.eliminar'
     ACTIVO_ADMINISTRAR = 'activo.administrar'
     DOCUMENTO_ADMINISTRAR = 'documento.administrar'
     MATRIZ_ADMINISTRAR = 'matriz.administrar'
@@ -49,6 +52,8 @@ ADMINISTRATIVE_PERMISSIONS = frozenset(p.value for p in (
     CodigoPermiso.MATRIZ_ADMINISTRAR,
     CodigoPermiso.DOCUMENTO_ADMINISTRAR,
     CodigoPermiso.ACTIVO_ADMINISTRAR,
+    CodigoPermiso.INCIDENCIA_ELIMINAR,
+    CodigoPermiso.RIESGO_ELIMINAR,
 ))
 
 # Permisos que el rol ADMIN debe conservar para no perder el gobierno de la plataforma.

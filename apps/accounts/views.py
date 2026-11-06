@@ -20,7 +20,7 @@ from apps.accounts.serializers import (
     UsuarioOutputSerializer,
     UsuarioSesionOutputSerializer,
 )
-from apps.accounts.services import AuthService, RoleService, UserService
+from apps.accounts.services import AccountDeletionService, AuthService, RoleService, UserService
 from config.constants import OpenApiTag
 
 
@@ -75,13 +75,14 @@ class MeView(APIView):
     retrieve=extend_schema(tags=[OpenApiTag.USUARIOS], responses=UsuarioOutputSerializer),
     create=extend_schema(tags=[OpenApiTag.USUARIOS], request=UsuarioInputSerializer, responses={201: UsuarioOutputSerializer}),
     partial_update=extend_schema(tags=[OpenApiTag.USUARIOS], request=UsuarioInputSerializer, responses=UsuarioOutputSerializer),
+    destroy=extend_schema(tags=[OpenApiTag.USUARIOS], responses={204: None}, summary='Elimina físicamente un usuario sin registros a su nombre (409 si los tiene)'),
 )
 class UserViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     viewsets.GenericViewSet,
 ):
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     permission_classes = [HasRiesgoTIPermission]
     required_permission = CodigoPermiso.USUARIO_ADMINISTRAR
     serializer_class = UsuarioOutputSerializer
@@ -106,6 +107,10 @@ class UserViewSet(
         user = UserService.update_user(request.user, instance, dto.validated_data)
         return Response(UsuarioOutputSerializer(user).data)
 
+    def destroy(self, request, pk=None):
+        AccountDeletionService.delete_user(request.user, self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 # ---------------------------------------------------------------------------
 # Administración de roles y catálogo de permisos
@@ -115,13 +120,14 @@ class UserViewSet(
     retrieve=extend_schema(tags=[OpenApiTag.ROLES], responses=RolOutputSerializer),
     create=extend_schema(tags=[OpenApiTag.ROLES], request=RolInputSerializer, responses={201: RolOutputSerializer}),
     update=extend_schema(tags=[OpenApiTag.ROLES], request=RolInputSerializer, responses=RolOutputSerializer),
+    destroy=extend_schema(tags=[OpenApiTag.ROLES], responses={204: None}, summary='Elimina físicamente un rol personalizado sin usuarios'),
 )
 class RoleViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     viewsets.GenericViewSet,
 ):
-    http_method_names = ['get', 'post', 'put', 'head', 'options']
+    http_method_names = ['get', 'post', 'put', 'delete', 'head', 'options']
     permission_classes = [HasRiesgoTIPermission]
     required_permission = CodigoPermiso.ROL_ADMINISTRAR
     serializer_class = RolOutputSerializer
@@ -147,6 +153,10 @@ class RoleViewSet(
         dto.is_valid(raise_exception=True)
         rol = RoleService.update_role(request.user, instance, dto.validated_data)
         return Response(RolOutputSerializer(self._reload(rol)).data)
+
+    def destroy(self, request, pk=None):
+        AccountDeletionService.delete_role(request.user, self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @extend_schema_view(

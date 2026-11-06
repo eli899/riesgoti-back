@@ -5,3 +5,7 @@ CRITERIOS_INCOMPLETOS = 'Debe definir exactamente los valores 1..{maximo} sin re
 GRILLA_INCOMPLETA = 'La grilla debe contener exactamente {celdas} celdas con coordenadas (probabilidad, impacto) únicas.'
 SIN_MATRIZ_ACTIVA = 'No existe una matriz de riesgo activa.'
 SIN_MATRIZ_PARA_CLONAR = 'No hay matriz activa de la cual clonar criterios; envíelos explícitamente.'
+ACTIVO_CON_REFERENCIAS = (
+    'El activo está referenciado por incidencias o versiones de riesgo; desactívelo en lugar de eliminarlo '
+    'para conservar la trazabilidad.'
+)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import OuterRef, Subquery
+from django.db.models import OuterRef, Q, Subquery
 from django.utils import timezone
 from django.utils.text import get_valid_filename
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -24,8 +24,9 @@ from apps.incidents import messages as msg
 from apps.incidents.constants import ATENCION_TEXTO_MIN_LENGTH, EstadoIncidencia, ResultadoOrientacion
 from apps.incidents.models import AtencionIncidencia, EvidenciaIncidencia, HistorialEstadoIncidencia, Incidencia
 from apps.risks.constants import EstadoTareaIA, RamaTareaIA, TipoOrientacion
-from apps.risks.models import OrientacionOperativa, RespuestaOrientacion, TareaIA
+from apps.risks.models import OrientacionOperativa, RespuestaOrientacion, TareaIA, VersionIncidencia
 from config.constants import IO_BLOCK_BYTES
+from config.exceptions import Conflict, delete_or_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,90 @@ class IncidentService:
         else:
             AuditService.log(actor=analista, incidencia=incidencia, accion=AccionAuditoria.REGISTRAR_AVANCE_ATENCION, detalle='Avance parcial N2.')
         return atencion
+
+    # ------------------------------------------------------------------
+    # Edición del reportante y eliminación física (CHG-0035)
+    # ------------------------------------------------------------------
+    EDITABLE_FIELDS = ('titulo', 'descripcion', 'activo_reportado', 'activo_texto')
+
+    @classmethod
+    @transaction.atomic
+    def update_incident(cls, *, incidencia: Incidencia, actor, data: dict) -> Incidencia:
+        """
+        Corrige los datos declarados por el reportante mientras la incidencia no esté CERRADA. No relanza la IA:
+        las TAREA_IA ya ejecutadas conservan el texto con el que se analizaron (trazabilidad).
+        """
+        incidencia, estado = cls._lock_with_status(incidencia.pk)
+        if incidencia.reportante_id != actor.id:
+            raise PermissionDenied(msg.SOLO_REPORTANTE_EDITA)
+        if estado == EstadoIncidencia.CERRADA:
+            raise ValidationError({'estado': msg.EDICION_FUERA_DE_ESTADO.format(estado=estado)})
+
+        cambios = []
+        for field in cls.EDITABLE_FIELDS:
+            if field not in data:
+                continue
+            value = data[field]
+            if isinstance(value, str):
+                value = value.strip() or None
+            if getattr(incidencia, field) != value:
+                setattr(incidencia, field, value)
+                cambios.append(field)
+        if not incidencia.titulo or not incidencia.descripcion:
+            raise ValidationError({'titulo': msg.EDICION_VACIA})
+        if incidencia.activo_reportado_id is None and not incidencia.activo_texto:
+            raise ValidationError({'activo_reportado_id': msg.ACTIVO_OBLIGATORIO})
+        if cambios:
+            incidencia.save(update_fields=cambios)
+            AuditService.log(
+                actor=actor, incidencia=incidencia, activo=incidencia.activo_reportado, accion=AccionAuditoria.ACTUALIZAR_INCIDENCIA,
+                detalle=f'Incidencia #{incidencia.id}: campos modificados {", ".join(cambios)}.',
+            )
+        return incidencia
+
+    @classmethod
+    def delete_incident(cls, *, incidencia: Incidencia, actor) -> None:
+        """
+        Elimina físicamente la incidencia con su historial, atención, evidencias, TAREA_IA, orientación y análisis.
+        409 si una rama de IA está en curso o si la incidencia sustenta una VERSION_RIESGO evaluada o decidida
+        (su vínculo es evidencia de recurrencia del riesgo, INV-02/INV-04). Los EVENTO_AUDITORIA se conservan.
+        """
+        with transaction.atomic():
+            incidencia = Incidencia.objects.select_for_update().get(pk=incidencia.pk)
+            tareas = list(TareaIA.objects.select_for_update().filter(incidencia=incidencia))
+            if any(t.estado == EstadoTareaIA.PROCESANDO for t in tareas):
+                raise Conflict(msg.ELIMINACION_IA_EN_CURSO)
+            versiones = sorted(set(
+                VersionIncidencia.objects.filter(analisis__tarea__incidencia=incidencia)
+                .filter(Q(version__evaluacion__isnull=False) | Q(version__decision__isnull=False))
+                .values_list('version_id', flat=True)
+            ))
+            if versiones:
+                raise Conflict(msg.ELIMINACION_RIESGO_DECIDIDO.format(versiones=', '.join(f'#{v}' for v in versiones)))
+
+            claves = list(incidencia.evidencias.values_list('clave_archivo', flat=True))
+            AuditService.log(
+                actor=actor, activo=incidencia.activo_reportado, accion=AccionAuditoria.ELIMINAR_INCIDENCIA,
+                detalle=(
+                    f'Incidencia #{incidencia.id} eliminada físicamente: "{incidencia.titulo}" '
+                    f'(reportante_id={incidencia.reportante_id}, registrada_en={incidencia.registrada_en.isoformat()}, '
+                    f'{len(claves)} evidencia(s), {len(tareas)} tarea(s) IA).'
+                ),
+            )
+            delete_or_conflict(incidencia, msg.ELIMINACION_PROTEGIDA)
+            transaction.on_commit(lambda: _remove_evidence_files(claves))
+
+
+def _remove_evidence_files(claves: list[str]) -> None:
+    """Borra los archivos de evidencia tras el COMMIT; un fallo de disco no revierte la eliminación ya confirmada."""
+    for clave in claves:
+        path = evidence_absolute_path(clave)
+        try:
+            path.unlink(missing_ok=True)
+            if path.parent != Path(settings.EVIDENCE_STORAGE_ROOT) and not any(path.parent.iterdir()):
+                path.parent.rmdir()
+        except OSError:
+            logger.warning('No se pudo borrar la evidencia %s tras eliminar la incidencia.', clave)
 
 
 def dispatch_ai_tasks(*tarea_ids: int) -> None:

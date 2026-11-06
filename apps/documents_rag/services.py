@@ -2,7 +2,7 @@
 Casos de uso de gobernanza documental: carga de PDF, procesamiento (chunking + embeddings + FAISS),
 autorización, activación/desactivación y re-indexación, con auditoría transversal.
 
-INV-04: los FRAGMENTO_DOCUMENTO de una versión que fue autorizada o que está citada jamás se eliminan;
+INV-04: los FRAGMENTO_DOCUMENTO citados jamás se eliminan (una versión solo se elimina inactiva y sin citas);
 desactivar una versión solo la excluye de nuevas consultas RAG.
 """
 import hashlib
@@ -24,6 +24,7 @@ from apps.documents_rag.embeddings import EmbeddingProviderService, resolve_embe
 from apps.documents_rag.faiss_store import FaissVectorStore
 from apps.documents_rag.models import Documento, FragmentoDocumento, VersionDocumento
 from config.constants import IO_BLOCK_BYTES, MAX_ERROR_CHARS
+from config.exceptions import Conflict, delete_or_conflict
 
 
 def get_active_ai_config() -> ConfiguracionIARAG | None:
@@ -301,3 +302,43 @@ class DocumentIngestionService:
         version_id = version.id
         transaction.on_commit(lambda: reindex_version_task.delay(version_id))
         return version
+
+    # ------------------------------------------------------------------
+    # Eliminación física (CHG-0035)
+    # ------------------------------------------------------------------
+    @classmethod
+    def delete(cls, actor, version: VersionDocumento) -> None:
+        """
+        Elimina la versión, sus fragmentos y sus vectores FAISS (y el DOCUMENTO si queda sin versiones). Solo
+        versiones inactivas, fuera de procesamiento y sin fragmentos citados: INV-04 exige preservar las citas.
+        """
+        with transaction.atomic():
+            version = cls._lock(version)
+            if version.procesamiento == ProcesamientoDocumento.PROCESANDO:
+                raise Conflict(msg.ELIMINAR_PROCESANDO)
+            if version.activa:
+                raise Conflict(msg.ELIMINAR_ACTIVA)
+            fragment_ids = list(version.fragmentos.values_list('id', flat=True))
+            if cls._has_citations(fragment_ids):
+                raise Conflict(msg.ELIMINAR_CITADA)
+
+            documento, clave, modelo = version.documento, version.clave_archivo, version.modelo_embedding
+            AuditService.log(
+                actor=actor, accion=AccionAuditoria.ELIMINAR_VERSION_DOCUMENTO,
+                detalle=(
+                    f'Versión documental #{version.pk} eliminada físicamente: {documento.codigo} v{version.version} '
+                    f'sha256={version.sha256} procesamiento={version.procesamiento} fragmentos={len(fragment_ids)}.'
+                ),
+            )
+            delete_or_conflict(version, msg.ELIMINAR_CITADA)
+            if not documento.versiones.exists():
+                documento.delete()
+            archivo_compartido = VersionDocumento.objects.filter(clave_archivo=clave).exists()
+
+            def _cleanup():
+                if modelo:
+                    FaissVectorStore.remove_vectors(modelo_embedding=modelo, fragment_ids=fragment_ids)
+                if not archivo_compartido:
+                    pdf_absolute_path(clave).unlink(missing_ok=True)
+
+            transaction.on_commit(_cleanup)

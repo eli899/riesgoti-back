@@ -33,12 +33,15 @@ PERMISOS = [
     (CodigoPermiso.INCIDENCIA_VER_PROPIAS, 'Consultar las incidencias reportadas por el propio usuario'),
     (CodigoPermiso.INCIDENCIA_VER_TODAS, 'Consultar todas las incidencias'),
     (CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK, 'Cerrar incidencias propias al confirmar que la orientación funcionó'),
+    (CodigoPermiso.INCIDENCIA_EDITAR_PROPIAS, 'Editar incidencias propias que aún no están cerradas'),
+    (CodigoPermiso.INCIDENCIA_ELIMINAR, 'Eliminar físicamente incidencias sin evidencia de riesgo decidida'),
     (CodigoPermiso.ATENCION_VER_COLA, 'Consultar la cola de atención humana (N2)'),
     (CodigoPermiso.ATENCION_ATENDER, 'Atender incidencias derivadas a N2'),
     (CodigoPermiso.RIESGO_REVISAR_AGRUPACION, 'Revisar agrupaciones de incidencias en versiones de riesgo'),
     (CodigoPermiso.RIESGO_EVALUAR, 'Evaluar riesgos en la matriz 5x5'),
     (CodigoPermiso.RIESGO_VALIDAR, 'Emitir decisiones sobre versiones de riesgo'),
     (CodigoPermiso.RIESGO_CONSULTAR, 'Consultar riesgos y tablero de indicadores'),
+    (CodigoPermiso.RIESGO_ELIMINAR, 'Eliminar físicamente versiones de riesgo sin evaluación ni decisión'),
     (CodigoPermiso.ACTIVO_ADMINISTRAR, 'Administrar el catálogo de activos'),
     (CodigoPermiso.DOCUMENTO_ADMINISTRAR, 'Administrar y autorizar documentos normativos'),
     (CodigoPermiso.MATRIZ_ADMINISTRAR, 'Administrar la configuración de la matriz de riesgo'),
@@ -50,7 +53,10 @@ PERMISOS = [
 PERMISOS_PROHIBIDOS_ADMIN = SOD_RISK_PERMISSIONS
 
 ROL_PERMISOS = {
-    RolCodigo.REPORTANTE: [CodigoPermiso.INCIDENCIA_CREAR, CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK],
+    RolCodigo.REPORTANTE: [
+        CodigoPermiso.INCIDENCIA_CREAR, CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK,
+        CodigoPermiso.INCIDENCIA_EDITAR_PROPIAS,
+    ],
     RolCodigo.ANALISTA: [
         CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_VER_TODAS, CodigoPermiso.ATENCION_VER_COLA, CodigoPermiso.ATENCION_ATENDER,
         CodigoPermiso.RIESGO_REVISAR_AGRUPACION, CodigoPermiso.RIESGO_EVALUAR, CodigoPermiso.RIESGO_VALIDAR, CodigoPermiso.RIESGO_CONSULTAR,
@@ -58,6 +64,7 @@ ROL_PERMISOS = {
     RolCodigo.ADMIN: [
         CodigoPermiso.INCIDENCIA_VER_PROPIAS, CodigoPermiso.INCIDENCIA_VER_TODAS, CodigoPermiso.RIESGO_CONSULTAR, CodigoPermiso.ACTIVO_ADMINISTRAR,
         CodigoPermiso.DOCUMENTO_ADMINISTRAR, CodigoPermiso.MATRIZ_ADMINISTRAR, CodigoPermiso.USUARIO_ADMINISTRAR, CodigoPermiso.ROL_ADMINISTRAR,
+        CodigoPermiso.INCIDENCIA_ELIMINAR, CodigoPermiso.RIESGO_ELIMINAR,
     ],
 }
 

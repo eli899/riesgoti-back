@@ -13,7 +13,7 @@ from apps.assets_matrix.serializers import (
     PublishMatrixInputSerializer,
     TipoActivoOutputSerializer,
 )
-from apps.assets_matrix.services import MatrixService
+from apps.assets_matrix.services import AssetService, MatrixService
 from apps.audit.constants import AccionAuditoria
 from apps.audit.mixins import AuditLogMixin
 from config.constants import OpenApiTag
@@ -29,6 +29,7 @@ ASSET_ADMIN_PERMISSION = CodigoPermiso.ACTIVO_ADMINISTRAR
     retrieve=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], responses=ActivoOutputSerializer),
     create=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], request=ActivoInputSerializer, responses={201: ActivoOutputSerializer}),
     partial_update=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], request=ActivoInputSerializer, responses=ActivoOutputSerializer),
+    destroy=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], responses={204: None}, summary='Elimina físicamente un activo sin referencias (409 si las tiene)'),
 )
 class ActivoViewSet(
     AuditLogMixin,
@@ -38,12 +39,13 @@ class ActivoViewSet(
 ):
     """
     Lectura para cualquier usuario autenticado (los reportantes eligen el activo afectado; solo ven activos vigentes).
-    Alta y edición exigen `activo.administrar`. No existe DELETE: desactivar preserva las referencias históricas.
+    Alta, edición y eliminación física exigen `activo.administrar`; DELETE responde 409 si el activo tiene referencias
+    históricas (en ese caso se desactiva).
     """
 
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     permission_classes = [HasRiesgoTIPermission]
-    permission_map = {'create': ASSET_ADMIN_PERMISSION, 'partial_update': ASSET_ADMIN_PERMISSION}
+    permission_map = {'create': ASSET_ADMIN_PERMISSION, 'partial_update': ASSET_ADMIN_PERMISSION, 'destroy': ASSET_ADMIN_PERMISSION}
     serializer_class = ActivoOutputSerializer
     filterset_fields = ['activo', 'tipo_id', 'criticidad']
     search_fields = ['codigo', 'nombre', 'descripcion']
@@ -82,6 +84,10 @@ class ActivoViewSet(
         dto.is_valid(raise_exception=True)
         self.perform_update(dto)
         return Response(ActivoOutputSerializer(dto.instance).data)
+
+    def destroy(self, request, pk=None):
+        AssetService.delete(request.user, self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @extend_schema_view(list=extend_schema(tags=[OpenApiTag.CATALOGO_ACTIVOS], summary='Tipos de activo vigentes'))

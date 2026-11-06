@@ -18,3 +18,12 @@ CIERRE_TEXTO_CORTO = 'Debe tener al menos {minimo} caracteres para cerrar la inc
 COLA_SIN_PERMISO = 'Se requiere el permiso atencion.ver_cola para consultar la cola N2.'
 EVIDENCIA_NO_ENCONTRADA = 'Evidencia no encontrada.'
 EVIDENCIA_SIN_ARCHIVO = 'El archivo de la evidencia no está disponible en el almacenamiento.'
+SOLO_REPORTANTE_EDITA = 'Solo el reportante puede editar su incidencia.'
+EDICION_FUERA_DE_ESTADO = 'La incidencia está {estado}; ya no admite edición.'
+EDICION_VACIA = 'Indique al menos un campo a modificar.'
+ELIMINACION_IA_EN_CURSO = 'La incidencia tiene un análisis de IA en curso; espere a que termine antes de eliminarla.'
+ELIMINACION_RIESGO_DECIDIDO = (
+    'La incidencia es evidencia de las versiones de riesgo {versiones}, ya evaluadas o decididas; '
+    'no puede eliminarse sin romper la trazabilidad del riesgo.'
+)
+ELIMINACION_PROTEGIDA = 'La incidencia tiene registros protegidos que impiden su eliminación física.'

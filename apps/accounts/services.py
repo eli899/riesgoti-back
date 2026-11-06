@@ -16,6 +16,7 @@ from apps.accounts.rbac import (
 )
 from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
+from config.exceptions import Conflict, delete_or_conflict
 
 
 # ---------------------------------------------------------------------------
@@ -174,3 +175,40 @@ class RoleService:
             detalle=f'codigo={instance.codigo} activo={instance.activo} permisos={",".join(sorted(permisos))}',
         )
         return instance
+
+
+# ---------------------------------------------------------------------------
+# Eliminación física (CHG-0035)
+# ---------------------------------------------------------------------------
+class AccountDeletionService:
+    @staticmethod
+    @transaction.atomic
+    def delete_user(actor: Usuario, instance: Usuario) -> None:
+        """409 si el usuario es autor de registros protegidos (PROTECT); sus EVENTO_AUDITORIA conservan el detalle."""
+        instance = Usuario.objects.select_for_update().select_related('rol').get(pk=instance.pk)
+        if actor.pk == instance.pk:
+            raise Conflict(msg.USUARIO_AUTOELIMINACION)
+        if instance.activo and instance.rol.codigo == RolCodigo.ADMIN:
+            otros_admins = Usuario.objects.select_for_update().filter(rol__codigo=RolCodigo.ADMIN, activo=True).exclude(pk=instance.pk)
+            if not list(otros_admins):
+                raise Conflict(msg.ULTIMO_ADMIN_ELIMINACION)
+        AuditService.log(
+            actor=actor, accion=AccionAuditoria.ELIMINAR_USUARIO, rol=instance.rol,
+            detalle=f'Usuario #{instance.pk} eliminado físicamente: {instance.nombre_completo} <{instance.correo}> rol={instance.rol.codigo}.',
+        )
+        delete_or_conflict(instance, msg.USUARIO_CON_REGISTROS)
+
+    @staticmethod
+    @transaction.atomic
+    def delete_role(actor: Usuario, instance: Rol) -> None:
+        instance = Rol.objects.select_for_update().get(pk=instance.pk)
+        if instance.codigo in SYSTEM_ROLE_CODES:
+            raise Conflict(msg.ROL_BASE_NO_ELIMINABLE)
+        if instance.usuarios.exists():
+            raise Conflict(msg.ROL_CON_USUARIOS)
+        permisos = sorted(instance.rol_permisos.values_list('permiso__codigo', flat=True))
+        AuditService.log(
+            actor=actor, accion=AccionAuditoria.ELIMINAR_ROL,
+            detalle=f'Rol #{instance.pk} eliminado físicamente: {instance.codigo} ({instance.nombre}) permisos={",".join(permisos)}.',
+        )
+        delete_or_conflict(instance, msg.ROL_CON_USUARIOS)

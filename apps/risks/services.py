@@ -77,6 +77,7 @@ from apps.risks.models import (
     VersionRiesgo,
 )
 from config.constants import MAX_ERROR_CHARS
+from config.exceptions import Conflict, delete_or_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -833,3 +834,28 @@ class RiskDashboardAggregationService:
             {'fecha': (desde + timedelta(days=i)).isoformat(), 'total': filas.get(desde + timedelta(days=i), 0)}
             for i in range(cls.SERIE_DIAS)
         ]
+
+
+class RiskVersionDeletionService:
+    @staticmethod
+    @transaction.atomic
+    def delete(*, version: VersionRiesgo, actor) -> None:
+        """
+        Elimina físicamente una propuesta pendiente (sin EVALUACION_RIESGO ni DECISION_RIESGO) con sus citas y vínculos
+        a incidencias; las incidencias y sus análisis se conservan. Si el RIESGO queda sin versiones, también se elimina.
+        """
+        version = VersionRiesgo.objects.select_for_update(of=('self',)).select_related('riesgo').get(pk=version.pk)
+        if EvaluacionRiesgo.objects.filter(version=version).exists() or DecisionRiesgo.objects.filter(version=version).exists():
+            raise Conflict(msg.ELIMINAR_VERSION_EVALUADA)
+        riesgo = version.riesgo
+        vinculos = version.incidencias_vinculadas.count()
+        AuditService.log(
+            actor=actor, accion=AccionAuditoria.ELIMINAR_VERSION_RIESGO,
+            detalle=(
+                f'Versión de riesgo #{version.pk} eliminada físicamente: {riesgo.codigo} v{version.numero} '
+                f'"{version.titulo}" ({vinculos} incidencia(s) vinculada(s), {version.citas.count()} cita(s)).'
+            ),
+        )
+        delete_or_conflict(version, msg.ELIMINAR_VERSION_EVALUADA)
+        if not riesgo.versiones.exists():
+            riesgo.delete()

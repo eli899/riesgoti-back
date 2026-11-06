@@ -17,3 +17,11 @@ SOD_COMBINACION = (
 )
 ROL_BASE_CODIGO_INMUTABLE = 'El código de un rol base del sistema no puede modificarse.'
 ROL_CON_USUARIOS_ACTIVOS = 'No se puede desactivar un rol con usuarios activos asignados.'
+USUARIO_AUTOELIMINACION = 'Un administrador no puede eliminar su propia cuenta.'
+ULTIMO_ADMIN_ELIMINACION = 'No se puede eliminar al último administrador activo.'
+USUARIO_CON_REGISTROS = (
+    'El usuario tiene incidencias, atenciones, tareas, evaluaciones, decisiones o documentos a su nombre; '
+    'desactívelo en lugar de eliminarlo para conservar la trazabilidad.'
+)
+ROL_BASE_NO_ELIMINABLE = 'Los roles base del sistema no pueden eliminarse.'
+ROL_CON_USUARIOS = 'No se puede eliminar un rol con usuarios asignados; reasígnelos primero.'

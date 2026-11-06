@@ -78,9 +78,12 @@ def test_reportante_no_puede_crear_ni_editar_activos(reportante_client):
     assert reportante_client.patch(f'/api/v1/assets/{activo.id}/', {'nombre': 'X'}, format='json').status_code == 403
 
 
-def test_activos_no_admiten_delete(admin_client):
+def test_activo_referenciado_no_se_elimina(admin_client, reportante_client):
+    """CHG-0035: DELETE existe, pero un activo con referencias históricas responde 409 y debe desactivarse."""
     activo = Activo.objects.get(codigo='ACT-001')
-    assert admin_client.delete(f'/api/v1/assets/{activo.id}/').status_code == 405
+    assert admin_client.delete(f'/api/v1/assets/{activo.id}/').status_code == 409
+    assert reportante_client.delete(f'/api/v1/assets/{activo.id}/').status_code == 403
+    assert Activo.objects.filter(pk=activo.pk).exists()
 
 
 # ---------------------------------------------------------------------------

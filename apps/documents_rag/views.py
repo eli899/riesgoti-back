@@ -21,6 +21,10 @@ from config.constants import OpenApiTag
 @extend_schema_view(
     list=extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL], summary='Versiones documentales y su estado de procesamiento'),
     retrieve=extend_schema(tags=[OpenApiTag.BASE_DOCUMENTAL]),
+    destroy=extend_schema(
+        tags=[OpenApiTag.BASE_DOCUMENTAL], responses={204: None},
+        summary='Elimina físicamente una versión inactiva sin fragmentos citados (409 en otro caso)',
+    ),
 )
 class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     permission_classes = [HasRiesgoTIPermission]
@@ -97,3 +101,7 @@ class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, v
     @action(detail=True, methods=['post'])
     def reindex(self, request, pk=None):
         return self._render(DocumentIngestionService.request_reindex(request.user, self.get_object()), status.HTTP_202_ACCEPTED)
+
+    def destroy(self, request, pk=None):
+        DocumentIngestionService.delete(request.user, self.get_object())
+        return Response(status=status.HTTP_204_NO_CONTENT)

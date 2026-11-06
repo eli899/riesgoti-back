@@ -21,3 +21,6 @@ VALIDAR_SIN_FUENTES = (
 )
 
 ACTIVO_INEXISTENTE = 'El activo seleccionado no existe o está inactivo.'
+ELIMINAR_VERSION_EVALUADA = (
+    'La versión de riesgo ya fue evaluada o decidida; forma parte del registro de riesgos y no puede eliminarse.'
+)

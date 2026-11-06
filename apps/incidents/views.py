@@ -24,6 +24,7 @@ from apps.incidents.serializers import (
     IncidentCreateInputSerializer,
     IncidentListDetailOutputSerializer,
     IncidentListOutputSerializer,
+    IncidentUpdateInputSerializer,
     OperationalGuidanceOutputSerializer,
     OrientationFeedbackInputSerializer,
 )
@@ -90,6 +91,8 @@ class IncidentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets
         'list': VIEW_PERMISSIONS,
         'retrieve': VIEW_PERMISSIONS,
         'create': CodigoPermiso.INCIDENCIA_CREAR,
+        'partial_update': CodigoPermiso.INCIDENCIA_EDITAR_PROPIAS,
+        'destroy': CodigoPermiso.INCIDENCIA_ELIMINAR,
         'operational_guidance': VIEW_PERMISSIONS,
         'download_evidence': VIEW_PERMISSIONS,
         'orientation_feedback': CodigoPermiso.INCIDENCIA_CERRAR_PROPIAS_POR_FEEDBACK,
@@ -157,6 +160,25 @@ class IncidentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets
             archivos_evidencia=data.get('evidencias', []),
         )
         return self._detail(incidencia.id, status.HTTP_201_CREATED)
+
+    @extend_schema(
+        tags=[OpenApiTag.INCIDENCIAS], request=IncidentUpdateInputSerializer, responses={200: IncidentListDetailOutputSerializer},
+        summary='Edita título, descripción o activo de una incidencia propia no cerrada (no relanza la IA)',
+    )
+    def partial_update(self, request, pk=None):
+        dto = IncidentUpdateInputSerializer(data=request.data, partial=True)
+        dto.is_valid(raise_exception=True)
+        incidencia = self.get_object()
+        IncidentService.update_incident(incidencia=incidencia, actor=request.user, data=dto.validated_data)
+        return self._detail(incidencia.id)
+
+    @extend_schema(
+        tags=[OpenApiTag.INCIDENCIAS], request=None, responses={204: None},
+        summary='Elimina físicamente la incidencia y sus dependientes (409 si sustenta un riesgo evaluado o decidido)',
+    )
+    def destroy(self, request, pk=None):
+        IncidentService.delete_incident(incidencia=self.get_object(), actor=request.user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @extend_schema(tags=[OpenApiTag.INCIDENCIAS], responses={200: OperationalGuidanceOutputSerializer}, summary='Estado y orientación operativa RAG')
     @action(detail=True, methods=['get'], url_path='operational-guidance')
