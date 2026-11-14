@@ -162,3 +162,15 @@ def test_test_connection_error_de_proveedor_no_filtra_secretos(admin_client):
     assert body['llm_status'] == 'error'
     assert 'AIzaSyTemporal1234' not in body['llm_error']
     assert 'AIzaSy...1234' in body['llm_error']
+
+
+def test_primera_configuracion_se_publica_cuando_no_hay_activa(admin_client):
+    """CHG-0039: con la semilla base no hay configuración IA/RAG; el administrador publica la inicial."""
+    ConfiguracionIARAG.objects.update(activa=False)
+    assert admin_client.get('/api/v1/admin/ai-config/').status_code == 404
+
+    response = admin_client.put('/api/v1/admin/ai-config/', VALID_PAYLOAD, format='json')
+
+    assert response.status_code == 200, response.json()
+    assert admin_client.get('/api/v1/admin/ai-config/').json()['version_configuracion'] == response.json()['version_configuracion']
+    assert ConfiguracionIARAG.objects.filter(activa=True).count() == 1

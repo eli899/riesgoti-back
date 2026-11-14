@@ -17,6 +17,20 @@ FINALIDADES = [f.value for f in FinalidadDocumento]
 PDF_MAGIC_BYTES = b'%PDF-'
 
 
+def validate_pdf_file(archivo):
+    """Tamaño máximo, extensión .pdf y firma %PDF-; compartido por la carga y el reemplazo de archivo."""
+    if archivo.size > settings.MAX_PDF_UPLOAD_BYTES:
+        raise serializers.ValidationError(msg.PDF_DEMASIADO_GRANDE.format(mb=settings.MAX_PDF_UPLOAD_BYTES // BYTES_PER_MB))
+    if not archivo.name.lower().endswith('.pdf'):
+        raise serializers.ValidationError(msg.SOLO_PDF)
+    archivo.seek(0)
+    header = archivo.read(len(PDF_MAGIC_BYTES))
+    archivo.seek(0)
+    if header != PDF_MAGIC_BYTES:
+        raise serializers.ValidationError(msg.PDF_INVALIDO)
+    return archivo
+
+
 class DocumentUploadInputSerializer(serializers.Serializer):
     """DTO de entrada multipart para la carga de una nueva VERSION_DOCUMENTO."""
 
@@ -37,16 +51,16 @@ class DocumentUploadInputSerializer(serializers.Serializer):
         return value.strip()
 
     def validate_archivo(self, archivo):
-        if archivo.size > settings.MAX_PDF_UPLOAD_BYTES:
-            raise serializers.ValidationError(msg.PDF_DEMASIADO_GRANDE.format(mb=settings.MAX_PDF_UPLOAD_BYTES // BYTES_PER_MB))
-        if not archivo.name.lower().endswith('.pdf'):
-            raise serializers.ValidationError(msg.SOLO_PDF)
-        archivo.seek(0)
-        header = archivo.read(len(PDF_MAGIC_BYTES))
-        archivo.seek(0)
-        if header != PDF_MAGIC_BYTES:
-            raise serializers.ValidationError(msg.PDF_INVALIDO)
-        return archivo
+        return validate_pdf_file(archivo)
+
+
+class DocumentReplaceFileInputSerializer(serializers.Serializer):
+    """DTO de entrada multipart para cargar nuevamente el PDF de una VERSION_DOCUMENTO en ERROR (CHG-0037)."""
+
+    archivo = serializers.FileField()
+
+    def validate_archivo(self, archivo):
+        return validate_pdf_file(archivo)
 
 
 class VersionDocumentoOutputSerializer(serializers.Serializer):

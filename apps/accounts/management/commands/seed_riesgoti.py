@@ -106,15 +106,31 @@ def nivel_por_score(score: int) -> str:
 
 
 class Command(BaseCommand):
-    help = 'Puebla de forma idempotente los catálogos base, usuarios semilla, matriz 5x5 y configuración IA/RAG de RiesgoTI.'
+    help = (
+        'Puebla de forma idempotente roles, permisos, usuarios semilla y niveles de riesgo de RiesgoTI. '
+        'Con --demo agrega además tipos de activo, activos, matriz 5x5, configuración IA/RAG, documentos, '
+        'incidencias y riesgos de demostración (uso exclusivo de pruebas automatizadas y del stack E2E).'
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--demo', action='store_true',
+            help='Carga también los datos de demostración (activos, matriz, IA/RAG, documentos, incidencias y riesgos).',
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
         roles = self._seed_roles_y_permisos()
         usuarios = self._seed_usuarios(roles)
+        niveles = self._seed_niveles()
+        if not options['demo']:
+            # CHG-0039: tipos de activo, activos, matriz inicial, configuración IA/RAG, documentos, incidencias y
+            # riesgos se registran desde la aplicación (rol ADMIN / REPORTANTE).
+            self.stdout.write(self.style.SUCCESS('Semillas base de RiesgoTI aplicadas (roles, permisos, usuarios y niveles).'))
+            return
         self._seed_activos()
         admin = usuarios['carla.mendoza@empresa.pe']
-        self._seed_matriz(admin)
+        self._seed_matriz(admin, niveles)
         self._seed_configuracion_ia(admin)
         # Documentos d1..d6: PDFs generados y procesados con el pipeline real (PyMuPDF4LLM -> chunks -> FAISS).
         seed_documents(admin, self.stdout)
@@ -122,7 +138,7 @@ class Command(BaseCommand):
         seed_incidents(self.stdout)
         # Riesgos RSG-0001..0005 del prototipo con versiones, citas, vínculos, evaluaciones y decisiones.
         seed_risks(self.stdout)
-        self.stdout.write(self.style.SUCCESS('Semillas de RiesgoTI aplicadas correctamente.'))
+        self.stdout.write(self.style.SUCCESS('Semillas de RiesgoTI aplicadas correctamente (incluye datos de demostración).'))
 
     def _seed_roles_y_permisos(self):
         roles = {
@@ -175,17 +191,22 @@ class Command(BaseCommand):
             )
         self.stdout.write(f'  TIPO_ACTIVO: {len(tipos)} | ACTIVO: {len(ACTIVOS)}')
 
-    def _seed_matriz(self, admin):
+    def _seed_niveles(self):
+        # Los 4 códigos son fijos: el frontend los usa en colores, tablero, mappers y tipos (RiskLevelCode).
         niveles = {
             codigo: NivelRiesgo.objects.update_or_create(codigo=codigo, defaults={'orden': orden})[0]
             for codigo, orden in NIVELES
         }
+        self.stdout.write(f'  NIVEL_RIESGO: {len(niveles)}')
+        return niveles
+
+    def _seed_matriz(self, admin, niveles):
         # INV-04: una matriz publicada es inmutable y su activación la gobierna POST /admin/matrices/publish/.
         # La matriz semilla solo se crea sobre una base sin matrices; nunca se reactiva ni se reescribe.
         if ConfiguracionMatriz.objects.exists():
             activa = ConfiguracionMatriz.objects.filter(activa=True).order_by('-creada_en', '-id').first()
             self.stdout.write(
-                f'  NIVEL_RIESGO: {len(niveles)} | CONFIGURACION_MATRIZ existente conservada '
+                f'  CONFIGURACION_MATRIZ existente conservada '
                 f'(activa: {activa.version if activa else "ninguna"})'
             )
             return
@@ -211,7 +232,7 @@ class Command(BaseCommand):
             for probabilidad in range(1, 6)
             for impacto in range(1, 6)
         ])
-        self.stdout.write(f'  NIVEL_RIESGO: {len(niveles)} | CELDA_MATRIZ: {matriz.celdas.count()}')
+        self.stdout.write(f'  CELDA_MATRIZ: {matriz.celdas.count()}')
 
     def _seed_configuracion_ia(self, admin):
         # El versionado de CONFIGURACION_IA_RAG lo gobierna PUT /admin/ai-config/: la semilla solo

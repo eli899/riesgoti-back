@@ -1,6 +1,11 @@
 """Mensajes de error de negocio del catálogo de activos y de la matriz de riesgo."""
 
 ACTIVO_CODIGO_DUPLICADO = 'Ya existe un activo con este código.'
+TIPO_ACTIVO_NOMBRE_VACIO = 'El nombre del tipo de activo es obligatorio.'
+TIPO_ACTIVO_NOMBRE_DUPLICADO = 'Ya existe un tipo de activo con este nombre.'
+TIPO_ACTIVO_CON_ACTIVOS = (
+    'El tipo de activo está asignado a uno o más activos; desactívelo en lugar de eliminarlo.'
+)
 CRITERIOS_INCOMPLETOS = 'Debe definir exactamente los valores 1..{maximo} sin repetir.'
 GRILLA_INCOMPLETA = 'La grilla debe contener exactamente {celdas} celdas con coordenadas (probabilidad, impacto) únicas.'
 SIN_MATRIZ_ACTIVA = 'No existe una matriz de riesgo activa.'

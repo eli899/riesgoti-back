@@ -11,7 +11,7 @@ from apps.documents_rag.embeddings import EmbeddingProviderService
 from apps.documents_rag.faiss_store import FINALIDADES_OPERATIVAS, FaissVectorStore
 from apps.documents_rag.models import FragmentoDocumento, VersionDocumento
 from apps.documents_rag.seed_documents import build_pdf_bytes
-from apps.documents_rag.services import DocumentIngestionService
+from apps.documents_rag.services import DocumentIngestionService, pdf_absolute_path
 from apps.documents_rag.tasks import process_pdf_version_task
 from apps.risks.models import CitaVersionRiesgo, Riesgo, VersionRiesgo
 
@@ -196,6 +196,45 @@ def test_retry_reprocesa_version_en_error(admin_client, django_capture_on_commit
 
     assert retry.status_code == 202 and retry.json()['procesamiento'] == 'PROCESANDO'
     assert process_pdf_version_task(response.json()['id'])['status'] == 'ok'
+
+
+def test_replace_file_carga_nuevamente_pdf_de_version_en_error(admin_client, django_capture_on_commit_callbacks):
+    response = _upload(admin_client, archivo=_pdf({}, 2, 'escaneado.pdf'))
+    version_id = response.json()['id']
+    assert process_pdf_version_task(version_id)['status'] == 'error'
+    anterior = VersionDocumento.objects.get(pk=version_id)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        replaced = admin_client.post(f'{BASE_URL}{version_id}/replace-file/', {'archivo': _vpn_pdf()}, format='multipart')
+
+    assert replaced.status_code == 202, replaced.json()
+    body = replaced.json()
+    assert body['id'] == version_id and body['version'] == 'v1.0' and body['procesamiento'] == 'PROCESANDO'
+    assert body['error_procesamiento'] is None and body['sha256'] != anterior.sha256
+    assert not pdf_absolute_path(anterior.clave_archivo).exists()
+    assert EventoAuditoria.objects.filter(accion='REEMPLAZAR_ARCHIVO_VERSION_DOCUMENTO', version_documento_id=version_id).exists()
+    assert process_pdf_version_task(version_id)['status'] == 'ok'
+    assert VersionDocumento.objects.get(pk=version_id).procesamiento == 'PENDIENTE_AUTORIZACION'
+
+
+def test_replace_file_solo_en_version_en_error(admin_client):
+    version = _uploaded_and_processed(admin_client)
+    response = admin_client.post(f'{BASE_URL}{version.id}/replace-file/', {'archivo': _vpn_pdf(' nuevo')}, format='multipart')
+    assert response.status_code == 400 and 'procesamiento' in response.json()
+
+
+def test_replace_file_rechaza_pdf_invalido_o_duplicado(admin_client):
+    contenido = _vpn_pdf().read()
+    _upload(admin_client, archivo=SimpleUploadedFile('politica.pdf', contenido, content_type='application/pdf'))
+    fallida = _upload(admin_client, version='v2.0', archivo=_vpn_pdf(' v2')).json()['id']
+    VersionDocumento.objects.filter(pk=fallida).update(procesamiento='ERROR', error_procesamiento='sin texto')
+    url = f'{BASE_URL}{fallida}/replace-file/'
+
+    no_pdf = SimpleUploadedFile('notas.txt', b'%PDF-1.7 texto', content_type='text/plain')
+    assert 'archivo' in admin_client.post(url, {'archivo': no_pdf}, format='multipart').json()
+    duplicado = SimpleUploadedFile('politica.pdf', contenido, content_type='application/pdf')
+    assert 'archivo' in admin_client.post(url, {'archivo': duplicado}, format='multipart').json()
+    assert VersionDocumento.objects.get(pk=fallida).procesamiento == 'ERROR'
 
 
 def test_autorizar_activa_y_reemplaza_version_anterior(admin_client):

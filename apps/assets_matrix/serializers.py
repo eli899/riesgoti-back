@@ -9,10 +9,38 @@ from config.constants import column_max_length
 # ---------------------------------------------------------------------------
 # Catálogo de activos
 # ---------------------------------------------------------------------------
+class TipoActivoInputSerializer(serializers.Serializer):
+    """DTO de entrada de TIPO_ACTIVO (POST completo / PATCH parcial). CHG-0039."""
+
+    nombre = serializers.CharField(max_length=column_max_length(TipoActivo, 'nombre'))
+    activo = serializers.BooleanField(required=False, default=True)
+
+    def validate_nombre(self, value: str) -> str:
+        nombre = ' '.join(value.split())
+        if not nombre:
+            raise serializers.ValidationError(msg.TIPO_ACTIVO_NOMBRE_VACIO)
+        qs = TipoActivo.objects.filter(nombre__iexact=nombre)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError(msg.TIPO_ACTIVO_NOMBRE_DUPLICADO)
+        return nombre
+
+    def create(self, validated_data):
+        return TipoActivo.objects.create(**validated_data)
+
+    def update(self, instance, validated_data):
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+        return instance
+
+
 class TipoActivoOutputSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     nombre = serializers.CharField()
     activo = serializers.BooleanField()
+    total_activos = serializers.IntegerField(required=False, default=0)
 
 
 class ActivoInputSerializer(serializers.Serializer):

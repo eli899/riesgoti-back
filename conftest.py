@@ -64,7 +64,7 @@ def _offline_ai_and_celery():
 @pytest.fixture(scope='session')
 def django_db_setup(django_db_setup, django_db_blocker, _isolated_storage, _offline_ai_and_celery):
     with django_db_blocker.unblock():
-        call_command('seed_riesgoti', verbosity=0)
+        call_command('seed_riesgoti', '--demo', verbosity=0)
 
 
 @pytest.fixture(autouse=True)

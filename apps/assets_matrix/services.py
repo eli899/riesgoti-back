@@ -4,7 +4,14 @@ from django.db.models import Prefetch
 from rest_framework.exceptions import NotFound, ValidationError
 
 from apps.assets_matrix import messages as msg
-from apps.assets_matrix.models import Activo, CeldaMatriz, ConfiguracionMatriz, CriterioImpacto, CriterioProbabilidad
+from apps.assets_matrix.models import (
+    Activo,
+    CeldaMatriz,
+    ConfiguracionMatriz,
+    CriterioImpacto,
+    CriterioProbabilidad,
+    TipoActivo,
+)
 from apps.audit.constants import AccionAuditoria
 from apps.audit.services import AuditService
 from config.exceptions import delete_or_conflict
@@ -73,6 +80,19 @@ class MatrixService:
             detalle=f'version={matriz.version} anterior={anterior.version if anterior else "-"} celdas={len(data["celdas"])}',
         )
         return cls._with_structure(ConfiguracionMatriz.objects.filter(pk=matriz.pk)).get()
+
+
+class AssetTypeService:
+    @staticmethod
+    @transaction.atomic
+    def delete(actor, tipo: TipoActivo) -> None:
+        """Eliminación física de un TIPO_ACTIVO (CHG-0039): 409 si algún ACTIVO lo usa (FK PROTECT)."""
+        tipo = TipoActivo.objects.select_for_update().get(pk=tipo.pk)
+        AuditService.log(
+            actor=actor, accion=AccionAuditoria.ELIMINAR_TIPO_ACTIVO,
+            detalle=f'Tipo de activo #{tipo.pk} eliminado físicamente: {tipo.nombre}.',
+        )
+        delete_or_conflict(tipo, msg.TIPO_ACTIVO_CON_ACTIVOS)
 
 
 class AssetService:

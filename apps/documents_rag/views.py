@@ -11,6 +11,7 @@ from apps.documents_rag.embeddings import resolve_embedding_settings
 from apps.documents_rag.models import FragmentoDocumento, VersionDocumento
 from apps.documents_rag.serializers import (
     DocumentPreviewOutputSerializer,
+    DocumentReplaceFileInputSerializer,
     DocumentUploadInputSerializer,
     VersionDocumentoOutputSerializer,
 )
@@ -93,6 +94,18 @@ class DocumentVersionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, v
     @action(detail=True, methods=['post'])
     def retry(self, request, pk=None):
         return self._render(DocumentIngestionService.retry(request.user, self.get_object()), status.HTTP_202_ACCEPTED)
+
+    @extend_schema(
+        tags=[OpenApiTag.BASE_DOCUMENTAL], request={'multipart/form-data': DocumentReplaceFileInputSerializer},
+        responses={202: VersionDocumentoOutputSerializer},
+        summary='Carga nuevamente el PDF de una versión en ERROR y la re-procesa',
+    )
+    @action(detail=True, methods=['post'], url_path='replace-file', parser_classes=[MultiPartParser, FormParser])
+    def replace_file(self, request, pk=None):
+        dto = DocumentReplaceFileInputSerializer(data=request.data)
+        dto.is_valid(raise_exception=True)
+        version = DocumentIngestionService.replace_file(request.user, self.get_object(), dto.validated_data['archivo'])
+        return self._render(version, status.HTTP_202_ACCEPTED)
 
     @extend_schema(
         tags=[OpenApiTag.BASE_DOCUMENTAL], request=None, responses={202: VersionDocumentoOutputSerializer},

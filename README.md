@@ -94,7 +94,7 @@ La primera construcción instala PyTorch (CPU), PyMuPDF y FAISS, y el primer pro
 
 `docker-compose.e2e.yml` (raíz) define un stack desechable, proyecto `riesgoti-e2e`, para la suite Playwright de `front/e2e/`, que lo levanta y destruye sola (`pnpm test:e2e`, ver `front/README.md`):
 
-- **Base de datos en `tmpfs`:** cada arranque ejecuta `migrate` y `seed_riesgoti` sobre una BD vacía.
+- **Base de datos en `tmpfs`:** cada arranque ejecuta `migrate` y `seed_riesgoti --demo` sobre una BD vacía.
 - **`storage/` en un volumen propio:** PDF, evidencias e índices FAISS no se mezclan con los de desarrollo.
 - **API en el puerto 8001**, con CORS para el front de pruebas (5174) y `LOGIN_THROTTLE_RATE=1000/min`.
 - **Reutiliza recursos existentes:** la imagen `riesgo_ti-backend` y el volumen `riesgo_ti_huggingface_cache`.
@@ -157,7 +157,8 @@ El token de acceso dura 30 minutos y el de refresco 1 día. Los claims incluyen 
 
 | Comando | Para qué |
 | --- | --- |
-| `python manage.py seed_riesgoti` | Carga roles, permisos, 6 usuarios de prueba, activos, matriz 5×5, configuración IA/RAG, documentos, incidencias y riesgos de demostración. Idempotente: no duplica ni reactiva versiones ya publicadas. |
+| `python manage.py seed_riesgoti` | Carga roles, permisos, 6 usuarios de prueba y los 4 niveles de riesgo. El resto (tipos de activo, activos, matriz inicial, configuración IA/RAG y documentos) se configura desde el portal de Administración (CHG-0039). Idempotente y nunca borra datos. |
+| `python manage.py seed_riesgoti --demo` | Agrega tipos de activo, activos, matriz 5×5, configuración IA/RAG, documentos, incidencias y riesgos de demostración. Lo usan `pytest` y el stack E2E. No duplica ni reactiva versiones ya publicadas. |
 | `python manage.py requeue_ai_tasks` | Vuelve a encolar las tareas de IA pendientes (útil si el worker estuvo caído). |
 | `python manage.py requeue_ai_tasks --dry-run` | Solo lista las tareas que se re-encolarían. |
 | `python manage.py requeue_ai_tasks --stale-minutes 10` | Libera tareas atascadas en `PROCESANDO` hace más de N minutos. |

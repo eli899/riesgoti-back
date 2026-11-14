@@ -14,6 +14,7 @@ REPROCESAR_ESTADO_INVALIDO = (
 )
 REPROCESAR_AUTORIZADA = 'Una versión que ya fue autorizada no puede re-segmentarse (INV-04).'
 REINDEXAR_NO_PROCESADA = 'Solo se re-indexan versiones procesadas (PENDIENTE_AUTORIZACION o AUTORIZADO).'
+REEMPLAZAR_ESTADO_INVALIDO = 'Solo se puede cargar nuevamente el PDF de una versión en ERROR que nunca fue autorizada.'
 ELIMINAR_PROCESANDO = 'La versión se está procesando; espere a que termine antes de eliminarla.'
 ELIMINAR_ACTIVA = 'Desactive la versión antes de eliminarla.'
 ELIMINAR_CITADA = (

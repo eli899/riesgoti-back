@@ -87,6 +87,51 @@ def test_activo_referenciado_no_se_elimina(admin_client, reportante_client):
 
 
 # ---------------------------------------------------------------------------
+# Tipos de activo (CHG-0039)
+# ---------------------------------------------------------------------------
+TIPOS_URL = '/api/v1/asset-types/'
+
+
+def test_admin_crea_edita_y_desactiva_tipo_de_activo_con_auditoria(admin_client, reportante_client):
+    creado = admin_client.post(TIPOS_URL, {'nombre': '  Base de   datos '}, format='json')
+    assert creado.status_code == 201, creado.json()
+    body = creado.json()
+    assert body['nombre'] == 'Base de datos' and body['activo'] is True and body['total_activos'] == 0
+
+    editado = admin_client.patch(f"{TIPOS_URL}{body['id']}/", {'nombre': 'Base de datos corporativa'}, format='json')
+    assert editado.status_code == 200 and editado.json()['nombre'] == 'Base de datos corporativa'
+    assert admin_client.patch(f"{TIPOS_URL}{body['id']}/", {'activo': False}, format='json').json()['activo'] is False
+
+    acciones = set(EventoAuditoria.objects.values_list('accion', flat=True))
+    assert {'CREAR_TIPO_ACTIVO', 'ACTUALIZAR_TIPO_ACTIVO', 'DESACTIVAR_TIPO_ACTIVO'} <= acciones
+    # Los usuarios sin activo.administrar solo ven tipos vigentes; el administrador ve todos.
+    assert body['id'] not in [t['id'] for t in reportante_client.get(TIPOS_URL).json()]
+    assert body['id'] in [t['id'] for t in admin_client.get(TIPOS_URL).json()]
+
+
+def test_tipo_de_activo_rechaza_nombre_duplicado(admin_client):
+    existente = TipoActivo.objects.first()
+    response = admin_client.post(TIPOS_URL, {'nombre': existente.nombre.upper()}, format='json')
+    assert response.status_code == 400 and 'nombre' in response.json()
+
+
+def test_tipo_de_activo_en_uso_no_se_elimina_y_uno_libre_si(admin_client):
+    en_uso = Activo.objects.select_related('tipo').first().tipo
+    assert admin_client.delete(f'{TIPOS_URL}{en_uso.id}/').status_code == 409
+    libre = admin_client.post(TIPOS_URL, {'nombre': 'Tipo temporal'}, format='json').json()
+    assert admin_client.delete(f"{TIPOS_URL}{libre['id']}/").status_code == 204
+    assert not TipoActivo.objects.filter(pk=libre['id']).exists()
+    assert EventoAuditoria.objects.filter(accion='ELIMINAR_TIPO_ACTIVO').exists()
+
+
+def test_reportante_no_administra_tipos_de_activo(reportante_client):
+    tipo = TipoActivo.objects.first()
+    assert reportante_client.post(TIPOS_URL, {'nombre': 'X'}, format='json').status_code == 403
+    assert reportante_client.patch(f'{TIPOS_URL}{tipo.id}/', {'nombre': 'X'}, format='json').status_code == 403
+    assert reportante_client.delete(f'{TIPOS_URL}{tipo.id}/').status_code == 403
+
+
+# ---------------------------------------------------------------------------
 # Matriz 5x5
 # ---------------------------------------------------------------------------
 def test_matriz_activa_completa(analista_client):
@@ -166,3 +211,20 @@ def test_bitacora_de_auditoria_filtrable(admin_client):
     assert body['count'] >= 1
     assert all(e['accion'] == 'PUBLICAR_CONFIGURACION_MATRIZ' for e in body['results'])
     assert body['results'][0]['actor_correo'] == 'carla.mendoza@empresa.pe'
+
+
+def test_primera_matriz_se_publica_con_criterios_cuando_no_hay_activa(admin_client, analista_client):
+    """CHG-0039: con la semilla base no existe matriz; el administrador publica la inicial desde la aplicación."""
+    ConfiguracionMatriz.objects.update(activa=False)
+    assert analista_client.get('/api/v1/matrices/active/').status_code == 404
+    criterios = [{'valor': v, 'nombre': f'Nivel {v}'} for v in range(1, 6)]
+    sin_criterios = admin_client.post('/api/v1/admin/matrices/publish/', {'celdas': _grilla()}, format='json')
+    assert sin_criterios.status_code == 400
+
+    response = admin_client.post('/api/v1/admin/matrices/publish/', {
+        'nombre': 'Matriz inicial', 'criterios_probabilidad': criterios, 'criterios_impacto': criterios, 'celdas': _grilla(),
+    }, format='json')
+
+    assert response.status_code == 201, response.json()
+    activa = analista_client.get('/api/v1/matrices/active/').json()
+    assert activa['nombre'] == 'Matriz inicial' and len(activa['celdas']) == 25

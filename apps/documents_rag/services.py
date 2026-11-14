@@ -286,6 +286,51 @@ class DocumentIngestionService:
         return version
 
     @classmethod
+    def replace_file(cls, actor, version: VersionDocumento, archivo) -> VersionDocumento:
+        """
+        Sustituye el PDF de una versión en ERROR jamás autorizada (p. ej. un PDF sin capa de texto) y la re-procesa
+        conservando código y número de versión (CHG-0037). Una versión en ERROR no tiene fragmentos indexados, por lo
+        que no hay citas ni vectores que preservar (INV-04 intacta).
+        """
+        sha256 = cls._sha256(archivo)
+        clave, created_file = cls._store_file(archivo, sha256)
+        try:
+            with transaction.atomic():
+                version = cls._lock(version)
+                if version.procesamiento != ProcesamientoDocumento.ERROR or version.autorizada_en is not None:
+                    raise ValidationError({'procesamiento': msg.REEMPLAZAR_ESTADO_INVALIDO})
+                duplicada = version.documento.versiones.filter(sha256=sha256).exclude(pk=version.pk).first()
+                if duplicada:
+                    raise ValidationError({'archivo': msg.PDF_DUPLICADO.format(version=duplicada.version)})
+
+                clave_anterior, sha_anterior = version.clave_archivo, version.sha256
+                version.clave_archivo = clave
+                version.sha256 = sha256
+                version.procesamiento = ProcesamientoDocumento.PROCESANDO
+                version.error_procesamiento = None
+                version.save(update_fields=['clave_archivo', 'sha256', 'procesamiento', 'error_procesamiento', 'ultima_modificacion'])
+                AuditService.log(
+                    actor=actor, accion=AccionAuditoria.REEMPLAZAR_ARCHIVO_VERSION_DOCUMENTO, version_documento=version,
+                    detalle=(
+                        f'codigo={version.documento.codigo} version={version.version} '
+                        f'sha256_anterior={sha_anterior} sha256_nuevo={sha256}'
+                    ),
+                )
+                cls.enqueue_processing(version)
+
+                if clave_anterior != clave:
+                    def _cleanup_previous():
+                        if not VersionDocumento.objects.filter(clave_archivo=clave_anterior).exists():
+                            pdf_absolute_path(clave_anterior).unlink(missing_ok=True)
+
+                    transaction.on_commit(_cleanup_previous)
+        except Exception:
+            if created_file:
+                pdf_absolute_path(clave).unlink(missing_ok=True)
+            raise
+        return version
+
+    @classmethod
     @transaction.atomic
     def request_reindex(cls, actor, version: VersionDocumento) -> VersionDocumento:
         from apps.documents_rag.tasks import reindex_version_task
