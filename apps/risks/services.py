@@ -97,6 +97,14 @@ GROUPING_LOCK_KEY = 270050  # pg_advisory_xact_lock: serializa la agrupación de
 SIN_RESPALDO_RESUMEN = ('No se encontraron manuales operativos autorizados que superen el umbral de similitud '
                         'para este caso.')
 SIN_RESPALDO_ADVERTENCIA = 'El caso ha sido derivado a un analista humano.'
+SUGERENCIA_EXTERNA_ADVERTENCIA = (
+    'Esta orientación preliminar fue formulada por la IA a partir de su conocimiento general de soporte TI, '
+    'sin respaldo en manuales operativos internos autorizados. Tu caso fue derivado preventivamente a un analista humano.'
+)
+SUGERENCIA_EXTERNA_MOTIVO = (
+    'Orientación preliminar por conocimiento general de la IA sin respaldo en manuales internos autorizados; '
+    'escalado preventivo a Analista N2.'
+)
 SENSIBLE_RESUMEN = ('El reporte describe un posible incidente de seguridad de la información que requiere '
                     'contención inmediata por un analista.')
 SENSIBLE_ADVERTENCIA = '\n'.join([
@@ -114,6 +122,16 @@ Reglas obligatorias:
 - Clasifica como SENSIBLE si el reporte involucra phishing, malware, credenciales comprometidas o acceso no
   autorizado; en ese caso entrega solo advertencias de contención y ningún paso técnico.
 - No pidas al usuario reinstalar software, modificar configuraciones del sistema ni abrir equipos."""
+
+OPERATIONAL_GENERAL_KNOWLEDGE_SYSTEM_PROMPT = """Eres el asistente de soporte TI de RiesgoTI (ISO/IEC 27001/27002).
+No se encontraron manuales operativos autorizados para esta incidencia en la base de conocimiento interna.
+Tu objetivo es formular una orientación operativa preliminar basada en tu conocimiento general de soporte TI para evitar dejar desatendido al usuario reportante.
+Reglas obligatorias:
+- Proporciona pasos técnicos preliminares estándar, seguros, reversibles y de bajo impacto (verificación de conexiones, reinicio de servicios o aplicaciones, revisión de estado de red, limpieza de caché).
+- No inventes procedimientos invasivos ni pidas al usuario reinstalar el sistema operativo, alterar configuraciones críticas del sistema ni abrir equipos.
+- Clasifica como SENSIBLE si el reporte describe phishing, malware, credenciales comprometidas o acceso no autorizado; en tal caso entrega únicamente advertencias de contención y ningún paso técnico.
+- NO agregues citas numéricas entre corchetes como [1] ni inventes fuentes documentales. Deja numeros_citas_usadas como lista vacía [].
+- En 'resumen' describe brevemente la hipótesis del problema y la solución sugerida."""
 
 STRATEGIC_SYSTEM_PROMPT = """Eres un analista de riesgos de seguridad de la información (ISO/IEC 27005:2022).
 A partir del reporte de incidencia identifica activo, amenaza, vulnerabilidad y consecuencia.
@@ -266,8 +284,10 @@ class OperationalRAGService:
             cfg = get_active_config()
             client = LLMClient(cfg)
             hits = FaissVectorStore.search_authorized_fragments(incident_query_text(incidencia), FINALIDADES_OPERATIVAS, cfg)
-            if not hits:  # Barrera anti-alucinación: no se invoca al LLM.
-                return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+            if not hits:  # Sin fragmentos que superen el umbral: contingencia por conocimiento general si hay LLM disponible.
+                if client.is_deterministic:
+                    return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+                return cls._generate_general_guidance(tarea, incidencia, client)
 
             output = client.generate(
                 system=OPERATIONAL_SYSTEM_PROMPT,
@@ -285,8 +305,10 @@ class OperationalRAGService:
                     pasos=pasos, citas=citas, proveedor=client.provider_label, modelo=client.model_label,
                     motivo='Derivación automática: el modelo clasificó el reporte como incidente de seguridad sensible.',
                 )
-            if not citas:  # Sugerencia sin ninguna cita verificable: se trata como sin respaldo.
-                return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+            if not citas:  # Sugerencia sin citas internas verificables: contingencia por conocimiento general si hay LLM.
+                if client.is_deterministic:
+                    return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+                return cls._generate_general_guidance(tarea, incidencia, client)
             return cls._persist(
                 tarea, tipo=TipoOrientacion.SUGERENCIA, resumen=output.resumen, advertencia=output.advertencia, pasos=[p for p in pasos if p],
                 citas=citas, proveedor=client.provider_label, modelo=client.model_label, motivo=None,
@@ -299,6 +321,51 @@ class OperationalRAGService:
                                    'escalado a Analista N2.',
             )
             return {'status': 'error', 'tarea_id': tarea.id, 'error': f'{type(exc).__name__}: {exc}'}
+
+    @classmethod
+    def _generate_general_guidance(cls, tarea, incidencia, client) -> dict:
+        """Contingencia: genera orientación operativa preliminar por conocimiento general cuando no hay citas internas."""
+        try:
+            output = client.generate(
+                system=OPERATIONAL_GENERAL_KNOWLEDGE_SYSTEM_PROMPT,
+                user=f'Reporte de incidencia:\n{incident_query_text(incidencia)}\n\n(No se encontraron manuales operativos autorizados en la base interna)',
+                schema=OperationalGuidanceLLMOutput,
+                fallback=lambda: None,
+            )
+            if output is None:
+                return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+
+            if output.tipo == TipoOrientacion.SENSIBLE:
+                return cls._persist(
+                    tarea, tipo=TipoOrientacion.SENSIBLE, resumen=output.resumen,
+                    advertencia=output.advertencia or SENSIBLE_ADVERTENCIA,
+                    pasos=[], citas=[], proveedor=client.provider_label, modelo=client.model_label,
+                    motivo='Derivación automática: el modelo clasificó el reporte como incidente de seguridad sensible.',
+                )
+
+            pasos = [strip_invalid_citations(p.instruccion, []) for p in sorted(output.pasos, key=lambda p: p.orden)]
+            pasos_limpios = [p for p in pasos if p]
+            if not pasos_limpios:
+                return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
+
+            advertencia = output.advertencia or SUGERENCIA_EXTERNA_ADVERTENCIA
+            if SUGERENCIA_EXTERNA_ADVERTENCIA not in advertencia:
+                advertencia = f'{SUGERENCIA_EXTERNA_ADVERTENCIA}\n\n{advertencia}'
+
+            return cls._persist(
+                tarea,
+                tipo=TipoOrientacion.SUGERENCIA_EXTERNA,
+                resumen=output.resumen,
+                advertencia=advertencia,
+                pasos=pasos_limpios,
+                citas=[],
+                proveedor=client.provider_label,
+                modelo=client.model_label,
+                motivo=SUGERENCIA_EXTERNA_MOTIVO,
+            )
+        except Exception:
+            logger.exception('Fallo al generar orientación por conocimiento general para TAREA_IA %s', tarea.id)
+            return cls._sin_respaldo(tarea, proveedor=client.provider_label, modelo=client.model_label)
 
     @classmethod
     def _sin_respaldo(cls, tarea, *, proveedor: str, modelo: str) -> dict:

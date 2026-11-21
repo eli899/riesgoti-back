@@ -160,7 +160,7 @@ def test_citas_inventadas_por_el_llm_se_descartan(reportante, relaxed_rag):
     assert tarea_op.proveedor == 'GEMINI'
 
 
-def test_sugerencia_del_llm_sin_citas_validas_se_trata_como_sin_respaldo(reportante, relaxed_rag):
+def test_sugerencia_del_llm_sin_citas_validas_genera_sugerencia_externa(reportante, relaxed_rag):
     incidencia, tarea_op, _ = _incident(reportante)
     salida = OperationalGuidanceLLMOutput(
         tipo='SUGERENCIA', resumen='Reinicia el equipo y prueba de nuevo.',
@@ -169,7 +169,46 @@ def test_sugerencia_del_llm_sin_citas_validas_se_trata_como_sin_respaldo(reporta
     with _llm_enabled(), mock.patch.object(LLMClient, '_gemini', return_value=salida):
         result = run_operational_rag_task(tarea_op.id)
 
+    assert result['tipo'] == 'SUGERENCIA_EXTERNA'
+    assert result['escalada'] is True
+    orientacion = OrientacionOperativa.objects.get(tarea=tarea_op)
+    assert orientacion.citas.count() == 0
+    assert orientacion.pasos.count() == 1
+    assert orientacion.pasos.get().instruccion == 'Reinicia el equipo.'
+    assert 'conocimiento general' in orientacion.advertencia
+    assert _status(incidencia) == 'PENDIENTE_ATENCION_HUMANA'
+
+
+def test_sin_respaldo_con_llm_activo_genera_sugerencia_externa(reportante):
+    ConfiguracionIARAG.objects.filter(activa=True).update(umbral_similitud=Decimal('0.999'))
+    incidencia, tarea_op, _ = _incident(reportante)
+    salida = OperationalGuidanceLLMOutput(
+        tipo='SUGERENCIA', resumen='Verifica la conexión física del cable de red.',
+        pasos=[OperationalStepOutput(orden=1, instruccion='Desconecta y vuelve a conectar el cable.')],
+        numeros_citas_usadas=[],
+    )
+    with _llm_enabled(), mock.patch.object(LLMClient, '_gemini', return_value=salida):
+        result = run_operational_rag_task(tarea_op.id)
+
+    assert result['tipo'] == 'SUGERENCIA_EXTERNA'
+    assert result['escalada'] is True
+    orientacion = OrientacionOperativa.objects.get(tarea=tarea_op)
+    assert orientacion.citas.count() == 0
+    assert orientacion.pasos.count() == 1
+    assert _status(incidencia) == 'PENDIENTE_ATENCION_HUMANA'
+
+
+def test_sugerencia_externa_sin_pasos_hace_fallback_a_sin_respaldo(reportante, relaxed_rag):
+    incidencia, tarea_op, _ = _incident(reportante)
+    salida = OperationalGuidanceLLMOutput(
+        tipo='SUGERENCIA', resumen='No tengo pasos sugeridos.',
+        pasos=[], numeros_citas_usadas=[],
+    )
+    with _llm_enabled(), mock.patch.object(LLMClient, '_gemini', return_value=salida):
+        result = run_operational_rag_task(tarea_op.id)
+
     assert result['tipo'] == 'SIN_RESPALDO'
+    assert result['escalada'] is True
     assert _status(incidencia) == 'PENDIENTE_ATENCION_HUMANA'
 
 
